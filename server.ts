@@ -313,6 +313,60 @@ async function startServer() {
     }
   });
 
+  // Get profile
+  app.get("/api/users/profile/:userId", async (req, res) => {
+    try {
+      const userId = req.params.userId;
+      try {
+        const [rows]: any = await db.execute("SELECT id, email, profile_data FROM users WHERE id = ?", [userId]);
+        if (rows && rows.length > 0) {
+           let profileData = rows[0].profile_data;
+           if (typeof profileData === 'string') {
+               try { profileData = JSON.parse(profileData); } catch(e){}
+           }
+           if (!profileData) profileData = {};
+           
+           // Fetch user images too
+           const [imgRows]: any = await db.execute("SELECT image_url FROM user_images WHERE user_id = ?", [userId]);
+           if (imgRows && imgRows.length > 0) {
+               profileData.images = imgRows.map((r: any) => r.image_url);
+           }
+           
+           // Fetch user song too
+           const [songRows]: any = await db.execute("SELECT song_title FROM user_songs WHERE user_id = ?", [userId]);
+           if (songRows && songRows.length > 0) {
+               profileData.songTitle = songRows[0].song_title;
+           }
+           
+           return res.json({ success: true, data: profileData });
+        } else {
+           const user = mockUsers.find(u => u.id.toString() === userId);
+           if (user) {
+              let pData = user.profile_data || {};
+              if (typeof pData === 'string') {
+                 try { pData = JSON.parse(pData); } catch(e){}
+              }
+              return res.json({ success: true, data: pData });
+           }
+           return res.status(404).json({ error: "User not found" });
+        }
+      } catch (err: any) {
+        const user = mockUsers.find(u => u.id.toString() === userId);
+        if (user) {
+           let pData = user.profile_data || {};
+           if (typeof pData === 'string') {
+              try { pData = JSON.parse(pData); } catch(e){}
+           }
+           return res.json({ success: true, data: pData });
+        }
+        return res.status(404).json({ error: "User not found" });
+      }
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ error: "Server Error" });
+    }
+  });
+
   // Get user preferences
   app.get("/api/user_preferences/:userId", async (req, res) => {
     try {
