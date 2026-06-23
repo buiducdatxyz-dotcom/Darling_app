@@ -33,12 +33,16 @@ function getGemini(): GoogleGenAI {
 // MySQL Connection Pool (Create connection if environment variables provided)
 const db = mysql.createPool({
   host: process.env.DB_HOST || "localhost",
-  port: parseInt(process.env.DB_PORT || '3306'),
+  port: process.env.DB_PORT ? parseInt(process.env.DB_PORT) : 3306,
   user: process.env.DB_USER || "root",
   password: process.env.DB_PASSWORD || "",
   database: process.env.DB_NAME || "darling_app",
   waitForConnections: true,
-  connectionLimit: 10
+  connectionLimit: 10,
+  queueLimit: 0,
+  ssl: (process.env.DB_HOST && process.env.DB_HOST !== "localhost" && process.env.DB_HOST !== "127.0.0.1") 
+    ? { rejectUnauthorized: false } 
+    : undefined
 });
 
 // Mock database for when DB is not configured (to keep app working in preview)
@@ -206,6 +210,7 @@ async function startServer() {
   }
 
   const app = express();
+  const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 
   app.use(express.json({ limit: '200mb' }));
   app.use(express.urlencoded({ limit: '200mb', extended: true }));
@@ -1180,20 +1185,10 @@ Nhiệm vụ cốt lõi & Quy tắc phản hồi khắt khe:
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
-const distPath = path.join(process.cwd(), 'dist'); 
-app.use(express.static(distPath));
 
-app.get('*', (req, res) => {
-  res.sendFile(path.join(distPath, 'index.html'));
-});
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`Server running on http://localhost:${PORT}`);
+  });
+}
 
-// 4. Khởi chạy Server
-const PORT = parseInt(process.env.PORT || '3000');
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Server is running on port ${PORT}`);
-  
-  // Kiểm tra kết nối DB khi khởi động
-  db.query("SELECT 1")
-    .then(() => console.log("Database connected successfully!"))
-    .catch((err) => console.error("Database connection failed:", err.message));
-});
+startServer();
