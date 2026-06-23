@@ -1,0 +1,11 @@
+{
+  "name": "Darling",
+  "description": "A dating application matching users based on common interests and lifestyle.",
+  "requestFramePermissions": [
+    "geolocation",
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
