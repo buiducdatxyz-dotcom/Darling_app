@@ -19,7 +19,7 @@ function getGemini(): GoogleGenAI {
       throw new Error("GEMINI_API_KEY is not defined in environment variables!");
     }
     ai = new GoogleGenAI({
-      apiKey: key,
+      apiKey: key.trim(),
       httpOptions: {
         headers: {
           'User-Agent': 'aistudio-build'
@@ -682,7 +682,7 @@ Nhiệm vụ cốt lõi & Quy tắc phản hồi khắt khe:
 
        const callAIWithTimeout = async () => {
           return aiClient.models.generateContent({
-             model: 'gemini-2.5-flash',
+             model: 'gemini-3.5-flash',
              contents: cleanMessages,
              config: {
                 systemInstruction: systemInstruction,
