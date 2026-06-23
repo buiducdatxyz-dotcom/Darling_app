@@ -38,8 +38,7 @@ const db = mysql.createPool({
   password: process.env.DB_PASSWORD || "",
   database: process.env.DB_NAME || "darling_app",
   waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
+  connectionLimit: 10
 });
 
 // Mock database for when DB is not configured (to keep app working in preview)
@@ -1181,19 +1180,20 @@ Nhiệm vụ cốt lõi & Quy tắc phản hồi khắt khe:
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
-  // Phục vụ các file tĩnh đã build từ Vite (thư mục dist/client)
-  app.use(express.static(path.join(process.cwd(), 'dist/client')));
+const distPath = path.join(process.cwd(), 'dist'); 
+app.use(express.static(distPath));
 
-  // Mọi request không phải API sẽ trả về index.html của React
-  app.get('*', (req, res) => {
-  res.sendFile(path.join(process.cwd(), 'dist/client', 'index.html'));
-  });
+app.get('*', (req, res) => {
+  res.sendFile(path.join(distPath, 'index.html'));
+});
 
-  const PORT = process.env.PORT || 3000;
-
-  app.listen(PORT, "0.0.0.0", () => {
+// 4. Khởi chạy Server
+const PORT = parseInt(process.env.PORT || '3000');
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server is running on port ${PORT}`);
-  });
-}
-
-startServer();
+  
+  // Kiểm tra kết nối DB khi khởi động
+  db.query("SELECT 1")
+    .then(() => console.log("Database connected successfully!"))
+    .catch((err) => console.error("Database connection failed:", err.message));
+});
