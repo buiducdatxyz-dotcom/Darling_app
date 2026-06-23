@@ -105,6 +105,27 @@ function normalizeSwipeAction(action: any): 'like' | 'pass' | null {
 
 async function startServer() {
   try {
+    // Create base tables users and user_images first
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        email VARCHAR(255) UNIQUE NOT NULL,
+        password VARCHAR(255) NOT NULL,
+        profile_data LONGTEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS user_images (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        image_url LONGTEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `);
+
     // Swipes (friend request/like)
     await db.execute(`
       CREATE TABLE IF NOT EXISTS swipes (
@@ -681,15 +702,30 @@ Nhiệm vụ cốt lõi & Quy tắc phản hồi khắt khe:
        const aiClient = getGemini();
 
        const callAIWithTimeout = async () => {
-          return aiClient.models.generateContent({
-             model: 'gemini-3.5-flash',
-             contents: cleanMessages,
-             config: {
-                systemInstruction: systemInstruction,
-                temperature: 0.75,
-                tools: [{ googleSearch: {} }]
-             }
-          });
+          try {
+             // First try with Google Search grounding
+             console.log("Attempting Gemini call with Google Search grounding...");
+             return await aiClient.models.generateContent({
+                model: 'gemini-3.5-flash',
+                contents: cleanMessages,
+                config: {
+                   systemInstruction: systemInstruction,
+                   temperature: 0.75,
+                   tools: [{ googleSearch: {} }]
+                }
+             });
+          } catch (searchError: any) {
+             console.warn("Gemini call with Google Search failed, immediately retrying without search tool:", searchError.message || searchError);
+             // Retry without tools
+             return await aiClient.models.generateContent({
+                model: 'gemini-3.5-flash',
+                contents: cleanMessages,
+                config: {
+                   systemInstruction: systemInstruction,
+                   temperature: 0.75
+                }
+             });
+          }
        };
 
        const timeoutPromise = new Promise<never>((_, reject) => {
