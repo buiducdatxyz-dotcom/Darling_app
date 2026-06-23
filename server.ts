@@ -33,6 +33,7 @@ function getGemini(): GoogleGenAI {
 // MySQL Connection Pool (Create connection if environment variables provided)
 const db = mysql.createPool({
   host: process.env.DB_HOST || "localhost",
+  port: parseInt(process.env.DB_PORT || '3306'),
   user: process.env.DB_USER || "root",
   password: process.env.DB_PASSWORD || "",
   database: process.env.DB_NAME || "darling_app",
@@ -1180,6 +1181,13 @@ Nhiệm vụ cốt lõi & Quy tắc phản hồi khắt khe:
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
+  // Phục vụ các file tĩnh đã build từ Vite (thư mục dist/client)
+  app.use(express.static(path.join(process.cwd(), 'dist/client')));
+
+  // Mọi request không phải API sẽ trả về index.html của React
+  app.get('*', (req, res) => {
+  res.sendFile(path.join(process.cwd(), 'dist/client', 'index.html'));
+  });
 
   const PORT = process.env.PORT || 3000;
 
