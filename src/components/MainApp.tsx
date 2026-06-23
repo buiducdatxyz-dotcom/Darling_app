@@ -2092,7 +2092,7 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
                        reader.onload = async (event) => {
                            if (event.target?.result) {
                                const base64Audio = event.target.result as string;
-                               const userId = sessionStorage.getItem('user_id');
+                               const userId = sessionStorage.getItem('user_id') || localStorage.getItem('user_id') || (myProfile && myProfile.id ? myProfile.id.toString() : '');
                                if (userId) {
                                    try {
                                        await fetch(`/api/users/${userId}/song`, {
