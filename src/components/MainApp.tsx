@@ -412,6 +412,19 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
       const uId = sessionStorage.getItem('user_id') || localStorage.getItem('user_id');
       if (uId && uId !== lastLoadedUserId) {
         setLastLoadedUserId(uId);
+        
+        // Fetch profile
+        fetch(`/api/users/profile/${uId}`)
+          .then(r => r.json())
+          .then(data => {
+             if (data.success && data.data) {
+                setMyProfile(data.data);
+                localStorage.setItem('ais_profile', JSON.stringify(data.data));
+             }
+          })
+          .catch(() => {});
+
+        // Fetch preferences
         fetch(`/api/user_preferences/${uId}`)
           .then(r => r.json())
           .then(data => {
@@ -428,6 +441,19 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
           .catch(() => {});
       } else if (!uId && lastLoadedUserId) {
         setLastLoadedUserId(null);
+        setMyProfile(USER_PROFILE_DATA);
+        localStorage.removeItem('ais_profile');
+        setSettings({
+           activePriorities: ['Dành Cho Bạn'],
+           distance: 100,
+           isDistanceFlexible: true,
+           ageMin: 18,
+           ageMax: 31,
+           isAgeFlexible: true,
+           interestedIn: 'Mọi người',
+           location: 'Hà Nội, Hà Nội'
+        });
+        localStorage.removeItem('ais_user_settings');
       }
     };
 
@@ -1548,7 +1574,7 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
          // Determine which info blocks to show for each image
          const renderElements = [];
          
-         const hasMusic = !!(currentProfile.songTitle && currentProfile.songUrl);
+         const hasMusic = !!currentProfile.songTitle;
          const imagesCount = currentProfile.images.length || 1;
 
          const commonFieldsCheck = ['pet', 'music', 'book', 'food', 'travel', 'game', 'sport', 'religion', 'communicationStyle', 'need', 'zodiac', 'job'];
@@ -1614,15 +1640,18 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
             }
          }
 
+         const isMusicPriority = settings?.activePriorities?.includes('Âm nhạc');
+         const isAstrologyPriority = settings?.activePriorities?.includes('Chiêm tinh');
+
          // BioCard (Giới thiệu bản thân) ONLY if currentProfile has a bio, on currentImageIndex === 0
-         if (currentImageIndex === 0 && currentProfile.bio && currentProfile.bio.trim() !== '') {
+         if (currentImageIndex === 0 && currentProfile.bio && currentProfile.bio.trim() !== '' && !isMusicPriority && !isAstrologyPriority) {
             renderElements.push(
                <BioCard key="bio_card" bio={currentProfile.bio} />
             );
          }
 
          // 1. Render Common Points ("Điểm chung" or "Tìm người yêu" description card) ONLY on index 0 and ONLY if hasCommonPoints is true
-         if (currentImageIndex === 0 && hasCommonPoints) {
+         if (currentImageIndex === 0 && hasCommonPoints && !isMusicPriority && !isAstrologyPriority) {
             const isLookingForLove = title === 'Tìm người yêu' || (currentProfile.need || '').toLowerCase().includes('yêu') || (currentProfile.need || '').toLowerCase().includes('lover');
             if (isLookingForLove) {
                renderElements.push(
@@ -1646,10 +1675,11 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
             }
          }
          
-         // 2. Render Astrology ("Chiêm tinh") card at target index
-         if (currentImageIndex === targetAstrologyIndex) {
+         // 2. Render Astrology ("Chiêm tinh") card
+         const shouldShowAstro = isAstrologyPriority || (currentImageIndex === targetAstrologyIndex && !isMusicPriority);
+         if (shouldShowAstro) {
             renderElements.push(
-              <div key="astro" className="bg-black/50 backdrop-blur-md px-4 py-3.5 rounded-xl border border-white/20 shadow-sm text-[14px] text-white cursor-pointer transition-all" onClick={(e) => { e.stopPropagation(); setIsAstrologyModalOpen(true); }}>
+              <div key="astro" className="bg-black/50 backdrop-blur-md px-4 py-3.5 rounded-xl border border-white/20 shadow-sm text-[14px] text-white cursor-pointer transition-all w-full" onClick={(e) => { e.stopPropagation(); setIsAstrologyModalOpen(true); }}>
                  <div className="line-clamp-2">
                    <span className="font-bold text-[#ffd700]">Chiêm tinh: </span>
                    <span className="text-white/90">{currentProfile.astrologyMatch}</span>
@@ -1660,7 +1690,7 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
          }
 
          // 3. Render Badges ("Nhu cầu", "Cung hoàng đạo", "Ngành nghề") at target index
-         if (currentImageIndex === targetBadgesIndex) {
+         if (currentImageIndex === targetBadgesIndex && !isMusicPriority && !isAstrologyPriority) {
             const badgesDef = [
                { key: 'need', label: 'Nhu cầu', icon: '🎯' },
                { key: 'zodiac', label: 'Cung hoàng đạo', icon: '🧭' },
@@ -1696,10 +1726,11 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
             }
          }
 
-         // 4. Render Music player at target index
-         if (hasMusic && currentImageIndex === targetMusicIndex) {
+         // 4. Render Music player
+         const shouldShowMusic = (hasMusic && isMusicPriority) || (hasMusic && currentImageIndex === targetMusicIndex && !isAstrologyPriority);
+         if (shouldShowMusic) {
             renderElements.push(
-              <div key="music" className="bg-black/50 backdrop-blur-md p-3 rounded-full border border-white/20 shadow-sm flex items-center justify-between mt-1 text-white max-w-[250px]" onClick={(e) => {
+              <div key="music" className="bg-black/50 backdrop-blur-md p-3.5 rounded-xl border border-white/20 shadow-sm flex items-center justify-between mt-1 text-white w-full" onClick={(e) => {
                  e.stopPropagation();
                  if (audioRef.current) {
                     if (isPlaying) {
@@ -1710,19 +1741,19 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
                     setIsPlaying(!isPlaying);
                  }
               }}>
-                 <div className="flex items-center gap-3 w-content">
-                    <div className="w-8 h-8 rounded-full bg-pink-500 flex items-center justify-center shrink-0">
-                       {isPlaying ? <Pause className="w-4 h-4 fill-white" /> : <Play className="w-4 h-4 fill-white translate-x-[1px]" />}
+                 <div className="flex items-center gap-3 min-w-0 flex-1">
+                    <div className="w-9 h-9 rounded-full bg-pink-500 flex items-center justify-center shrink-0">
+                       {isPlaying ? <Pause className="w-[18px] h-[18px] fill-white text-white" /> : <Play className="w-[18px] h-[18px] fill-white text-white translate-x-[1px]" />}
                     </div>
-                    <div className="flex flex-col overflow-hidden">
-                       <span className="text-[13px] font-bold truncate">{currentProfile.songTitle}</span>
-                       <span className="text-[11px] text-white/70 truncate">Tải lên bởi {currentProfile.name}</span>
+                    <div className="flex flex-col min-w-0 flex-1">
+                       <span className="text-[14px] font-bold text-white truncate w-full block">{currentProfile.songTitle}</span>
+                       <span className="text-[11px] text-white/70 truncate block">Tải lên bởi {currentProfile.name}</span>
                     </div>
                  </div>
-                 <div className="flex gap-1 ml-4 justify-center items-center">
-                    <span className={"w-1 h-3 bg-white/50 rounded-full " + (isPlaying ? 'animate-[bounce_0.8s_infinite]' : '')}></span>
-                    <span className={"w-1 h-4 bg-white/70 rounded-full " + (isPlaying ? 'animate-[bounce_1s_infinite]' : '')}></span>
-                    <span className={"w-1 h-2 bg-white/40 rounded-full " + (isPlaying ? 'animate-[bounce_0.6s_infinite]' : '')}></span>
+                 <div className="flex gap-1 ml-3 justify-center items-center shrink-0">
+                    <span className={`w-1 h-3.5 bg-white/50 rounded-full ` + (isPlaying ? 'animate-[bounce_0.8s_infinite]' : '')}></span>
+                    <span className={`w-1 h-4.5 bg-white/70 rounded-full ` + (isPlaying ? 'animate-[bounce_1s_infinite]' : '')}></span>
+                    <span className={`w-1 h-2.5 bg-white/40 rounded-full ` + (isPlaying ? 'animate-[bounce_0.6s_infinite]' : '')}></span>
                  </div>
               </div>
             );
@@ -1746,7 +1777,7 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
              }
          }
 
-         if (slice.length > 0) {
+         if (slice.length > 0 && !isMusicPriority && !isAstrologyPriority) {
             renderElements.push(
               <div key="tags" className="flex flex-wrap gap-2 mt-1">
                  {slice.map((t: any, i: number) => (
@@ -2193,7 +2224,7 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
                 {/* Horizontal Chips section */}
                 <div className="bg-[#222] rounded-3xl pt-2 px-2 pb-6 mb-6 mt-2">
                    <div className="flex gap-3 overflow-x-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-                     {['Dành Cho Bạn', 'Chiêm tinh', 'Âm nhạc', 'Tarot tình yêu'].map(cat => (
+                     {['Dành Cho Bạn', 'Chiêm tinh', 'Âm nhạc'].map(cat => (
                         <button 
                           key={cat} 
                           onClick={() => toggleLocalPriority(cat)}
