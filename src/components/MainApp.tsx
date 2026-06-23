@@ -261,6 +261,7 @@ export const AppContext = React.createContext<{
   saveSettings?: (currentSettings: any) => Promise<boolean>;
   isSavingPref?: boolean;
   onNavigate?: (view: ViewState) => void;
+  logout?: () => void;
   activeChatUser: any;
   setActiveChatUser: (user: any) => void;
   isTestFemaleView: boolean;
@@ -302,7 +303,8 @@ export const AppContext = React.createContext<{
   setupData: {},
   updateSetupData: () => {},
   globalMatchModal: null,
-  setGlobalMatchModal: () => {}
+  setGlobalMatchModal: () => {},
+  logout: () => {}
 });
 
 export function GlobalAppStateProvider({ children, onNavigate }: { children: React.ReactNode, onNavigate?: (v: ViewState) => void }) {
@@ -526,7 +528,9 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
                      food: profileData.food || profileData.lifestyle?.food || (['Đồ ăn cay', 'Ăn chay', 'Đồ nướng', 'Cà phê', 'Phở'][u.id % 5]),
                      travel: profileData.travel || profileData.lifestyle?.travel || (['Bãi biển', 'Đà Lạt', 'SaPa', 'Hội An', 'Thành phố'][u.id % 5]),
                      game: profileData.game || profileData.lifestyle?.game || (['Genshin Impact', 'FiFa', 'Liên quân', 'Minecraft', 'Board games'][u.id % 5]),
-                     sport: profileData.sport || profileData.lifestyle?.sport || (['Pickleball', 'Bóng đá', 'Gym', 'Tennis'][u.id % 4])
+                     sport: profileData.sport || profileData.lifestyle?.sport || (['Pickleball', 'Bóng đá', 'Gym', 'Tennis'][u.id % 4]),
+                      songTitle: profileData.songTitle,
+                      songUrl: profileData.songUrl
                   };
                });
                const myId = parseInt(sessionStorage.getItem('user_id') || '0');
@@ -681,8 +685,36 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
     });
   };
 
+  const logout = () => {
+    localStorage.clear();
+    sessionStorage.clear();
+    setMyProfile(USER_PROFILE_DATA);
+    setServerUsers([]);
+    setLikedProfiles([]);
+    setSavedProfiles([]);
+    setSwipedRecords([]);
+    setLastLoadedUserId(null);
+    setSetupData({});
+    setActiveChatUser(null);
+    setSettings({
+       activePriorities: ['Dành Cho Bạn'],
+       distance: 100,
+       isDistanceFlexible: true,
+       ageMin: 18,
+       ageMax: 31,
+       isAgeFlexible: true,
+       interestedIn: 'Mọi người',
+       location: 'Hà Nội, Hà Nội'
+    });
+    if (onNavigate) {
+       onNavigate('login');
+    } else {
+       window.location.reload();
+    }
+  };
+
   return (
-    <AppContext.Provider value={{ serverUsers, likedProfiles, savedProfiles, toggleLike, toggleSave, swipedRecords, registerSwipe, settings, updateSettings, onNavigate, activeChatUser, setActiveChatUser, isTestFemaleView, toggleTestFemaleView: () => setIsTestFemaleView(v => !v), myProfile, updateMyProfile, setupData, updateSetupData, globalMatchModal, setGlobalMatchModal, fetchMoreUsers, saveSettings, isSavingPref }}>
+    <AppContext.Provider value={{ serverUsers, likedProfiles, savedProfiles, toggleLike, toggleSave, swipedRecords, registerSwipe, settings, updateSettings, onNavigate, activeChatUser, setActiveChatUser, isTestFemaleView, toggleTestFemaleView: () => setIsTestFemaleView(v => !v), myProfile, updateMyProfile, setupData, updateSetupData, globalMatchModal, setGlobalMatchModal, fetchMoreUsers, saveSettings, isSavingPref, logout }}>
       {children}
     </AppContext.Provider>
   );
@@ -867,7 +899,7 @@ export function filterProfiles(profiles: any[], settings: any, myGender: string 
 
     // For priorities like "Âm nhạc" hay "Chiêm tinh", check if they exist on the profile
     let priorityMatch = true;
-    if (activePriorities.includes('Âm nhạc') && !profile.music) {
+    if (activePriorities.includes('Âm nhạc') && !profile.songTitle) {
       priorityMatch = false;
     }
     if (activePriorities.includes('Chiêm tinh') && !profile.astrologyMatch) {
@@ -1232,6 +1264,7 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
   const [showFullReading, setShowFullReading] = useState(false);
   const [astrologyCardIndex, setAstrologyCardIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isUploadingMusic, setIsUploadingMusic] = useState(false);
   const [topActionModal, setTopActionModal] = useState<null | 'music' | 'astrology' | 'settings' | 'tarot'>(null);
   const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
   const [isAddLocationModalOpen, setIsAddLocationModalOpen] = useState(false);
@@ -2119,6 +2152,7 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
                 <input type="file" accept="audio/*" ref={musicInputRef} className="hidden" onChange={(e) => {
                     if (e.target.files && e.target.files[0]) {
                        const file = e.target.files[0];
+                       setIsUploadingMusic(true);
                        const reader = new FileReader();
                        reader.onload = async (event) => {
                            if (event.target?.result) {
@@ -2137,15 +2171,23 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
                                    globalAudioCache[file.name] = URL.createObjectURL(file);
                                }
                                updateMyProfile({ songTitle: file.name, songUrl: globalAudioCache[file.name] });
+                               setIsUploadingMusic(false);
                                setTopActionModal(null);
                            }
                        };
                        reader.readAsDataURL(file);
                     }
                  }} />
-                 <button className="w-[80%] bg-pink-600 font-bold text-white py-3.5 rounded-full shadow-lg active:scale-95 transition-transform" onClick={() => musicInputRef.current?.click()}>
-                    Tải bài hát lên
-                 </button>
+                 {isUploadingMusic ? (
+                     <div className="flex flex-col items-center gap-3 py-3">
+                         <div className="w-8 h-8 border-4 border-pink-500 border-t-transparent rounded-full animate-spin"></div>
+                         <p className="text-[14px] text-pink-400 font-semibold animate-pulse">Đang tải nhạc lên hệ thống, vui lòng chờ chút nhé...</p>
+                     </div>
+                 ) : (
+                     <button className="w-[80%] bg-pink-600 font-bold text-white py-3.5 rounded-full shadow-lg active:scale-95 transition-transform" onClick={() => musicInputRef.current?.click()}>
+                        Tải bài hát lên
+                     </button>
+                 )}
                  {myProfile.songTitle && (
                     <p className="mt-6 text-green-400 font-bold text-center px-4 w-full truncate border border-green-500/20 bg-green-500/10 rounded-xl py-3">Bài hát hiện tại: {myProfile.songTitle}</p>
                  )}
@@ -3846,6 +3888,7 @@ export function ChatView() {
 }
 
 export function ProfileView({ onNavigate }: { onNavigate?: (v: any) => void }) {
+  const { logout } = React.useContext(AppContext);
   return (
     <div className="bg-[#ff9ca0] min-h-screen p-6 pb-24 text-gray-900 font-sans">
        <div className="flex justify-between items-start mb-6">
@@ -3899,7 +3942,7 @@ export function ProfileView({ onNavigate }: { onNavigate?: (v: any) => void }) {
        </div>
 
        <div className="flex justify-end mt-8">
-         <button onClick={() => { localStorage.clear(); sessionStorage.clear(); if(onNavigate) onNavigate('login'); }} className="bg-[#f03e5c] text-white px-6 py-3 rounded-lg font-medium shadow-sm active:bg-red-700 transition">
+         <button onClick={() => { if (logout) logout(); else { localStorage.clear(); sessionStorage.clear(); if(onNavigate) onNavigate('login'); } }} className="bg-[#f03e5c] text-white px-6 py-3 rounded-lg font-medium shadow-sm active:bg-red-700 transition">
            Đăng xuất
          </button>
        </div>
