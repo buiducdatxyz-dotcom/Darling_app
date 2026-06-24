@@ -714,15 +714,185 @@ Nhiệm vụ cốt lõi & Quy tắc phản hồi khắt khe:
       }
 
       const rawHash = Math.abs(userText.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0));
-      const msgCount = msgs.length;
+
+      // 1. Thả thính / Tỏ tình / Crush
+      if (userText.includes("thả thính") || userText.includes("tán") || userText.includes("cua") || userText.includes("tỏ tình") || userText.includes("crush") || userText.includes("thầm thương") || userText.includes("đơn phương")) {
+        return `Darling biết rằng cảm giác thích thầm một ai đó thật ngọt ngào nhưng cũng tràn đầy sự bồi hồi đúng không nè? Thả thính tinh tế hay bày tỏ tình cảm là cả một nghệ thuật để mở lối vào trái tim đối phương đó! 💖
+
+Darling gợi ý cho cậu vài tuyệt chiêu và câu nói cực kỳ tinh tế nha:
+
+1. **Thả thính bằng sự quan tâm thầm lặng:** Thay vì những lời hoa mỹ sáo rỗng, hãy chú ý đến những chi tiết nhỏ của đối phương. Một ly nước ấm khi họ mệt mỏi, hay câu hỏi *"Hôm nay đi làm có mệt không nhen?"* luôn có sức công phá cực kỳ mạnh mẽ.
+2. **Câu thả thính ngọt ngào và tự nhiên:**
+   - *"Tớ vốn thích ngắm hoàng hôn, nhưng từ lúc gặp cậu, tớ nhận ra hoàng hôn chỉ là cái cớ để tớ được nhìn thấy nụ cười của cậu thôi."*
+   - *"Thế gian này có muôn vàn giai điệu, nhưng Darling thấy bản nhạc ấm áp nhất chính là âm thanh giọng nói của cậu mỗi ngày đấy."*
+   - *"Nếu một ngày cậu thấy mệt mỏi với thế giới ngoài kia, cứ quay đầu lại nhen, luôn có tớ sẵn sàng ngồi nghe cậu tâm sự nè."*
+3. **Chân thành là chìa khóa vàng:** Khi tỏ tình hoặc trò chuyện, hãy bộc lộ cảm xúc một cách tự nhiên nhất. Sự vụng về nhưng chân thành luôn đáng yêu hơn bất kỳ kịch bản hoàn hảo nào.
+
+*Lời khuyên từ Darling:* Hãy chọn thời điểm cả hai đang vui vẻ, thoải mái để gửi gắm những lời này nhen. Cậu cực kỳ tuyệt vời, cứ tự tin lên nhé! Cậu có muốn Darling mách thêm tuyệt chiêu cưa đổ cung hoàng đạo cụ thể nào của đối phương không? 💕`;
+      }
+
+      // 2. Giận dỗi / Cãi nhau / Lạnh nhạt
+      if (userText.includes("giận") || userText.includes("dỗ") || userText.includes("cãi") || userText.includes("lạnh nhạt") || userText.includes("bực bối") || userText.includes("mâu thuẫn")) {
+        return `Thương cậu quá... Khi người mình thương giận dỗi hoặc mối quan hệ trở nên lạnh nhạt, trong lòng cậu chắc hẳn đang vô cùng ngổn ngang và lo lắng đúng không nhen? Đừng quá hoảng sợ nhé, mâu thuẫn chính là cơ hội để tụi mình hiểu sâu sắc hơn về nửa kia đó. 🌸
+
+Hãy cùng Darling thực hành 3 bước vàng để dỗ dành và sưởi ấm mối quan hệ nha:
+
+1. **Xoa dịu cảm xúc trước khi phân bua đúng sai:** Khi đối phương đang giận, lý lẽ lúc này không có tác dụng đâu nè. Hãy dịu giọng xuống và nói: *"Tớ biết cậu đang rất buồn và bực bội. Tớ xin lỗi vì đã làm cậu phải bận lòng thế này nhen."* Sự đồng cảm này sẽ giúp ngọn lửa giận dập tắt đi rất nhiều.
+2. **Hành động quan tâm tinh tế và ngọt ngào:** Gửi một ly trà sữa họ thích, hay một món quà nhỏ bất ngờ kèm mẩu giấy viết tay: *"Bánh ngọt này để dỗ dành một xíu giận dỗi trong lòng cậu nhen. Khi nào hết giận thì cho tớ xin một cái ôm nhé!"*
+3. **Ngồi lại lắng nghe chân thành:** Khi cả hai đã bình tĩnh, hãy ôm nhẹ đối phương và hỏi: *"Lúc nãy tớ làm gì khiến cậu tổn thương nhất? Nói cho tớ nghe để tớ sửa nhen, tớ không muốn tụi mình xa cách đâu."*
+
+*Darling nhắn nhủ:* Tuyệt đối đừng im lặng quá lâu hay chiến tranh lạnh nhen cậu, vì sự im lặng dễ tạo ra khoảng cách lớn lắm á. Hãy chủ động sưởi ấm cho họ bằng tình thương ấm áp của cậu nhé! Cậu đang gặp tình huống cụ thể thế nào, kể thêm cho Darling nghe nhen? 💕`;
+      }
+
+      // 3. Thấu hiểu tâm lý / Hành vi / Im lặng
+      if (userText.includes("tâm lý") || userText.includes("thấu hiểu") || userText.includes("im lặng") || userText.includes("suy nghĩ") || userText.includes("lắng nghe") || userText.includes("hành vi")) {
+        return `Thấu hiểu tâm lý của đối phương - đặc biệt là khi họ im lặng hoặc có những hành vi khó đoán - giống như việc cậu kiên nhẫn lật mở từng trang của một cuốn sách cổ tinh xảo vậy nhen. 🔑
+
+Darling xin chia sẻ với cậu một số góc nhìn tâm lý học hành vi cực kỳ sâu sắc này nha:
+
+1. **Giải mã sự im lặng:** Đôi khi im lặng không phải là hết yêu hay thờ ơ, mà là cách họ bảo vệ bản thân khi cảm xúc bị quá tải, hoặc họ đang cần một khoảng không gian riêng tư để tự cân bằng. Hãy cho họ thời gian và nhắn: *"Tớ luôn ở đây chờ cậu, khi nào sẵn sàng cứ nói chuyện với tớ nhen."*
+2. **Yêu bằng ngôn ngữ hành động:** Có những người rất vụng về trong lời nói nhưng họ lại thể hiện tình yêu bằng hành động: nhớ thói quen của cậu, lặng lẽ chăm sóc, hay ở bên cậu lúc khó khăn. Hãy trân trọng những chi tiết nhỏ bé ấy nhé.
+3. **Tạo vùng an toàn cảm xúc:** Để người ấy sẵn sàng mở lòng sẻ chia, cậu hãy là người lắng nghe không phán xét. Đừng vội đưa ra lời khuyên hay chỉ trích, chỉ cần thể hiện sự đồng cảm sâu sắc là đủ rồi nè.
+
+*Lời khuyên từ Darling:* Thấu hiểu là một hành trình dài cần sự kiên nhẫn vô hạn của trái tim. Cậu đang làm rất tốt khi nỗ lực tìm hiểu thế giới nội tâm của người ấy đó. Kể thêm cho Darling nghe về tính cách của người ấy để mình cùng phân tích nhé! 💕`;
+      }
+
+      // 4. Chữa lành / Tổn thương / Chia tay / Người cũ / Toxic
+      if (userText.includes("chữa lành") || userText.includes("chia tay") || userText.includes("tổn thương") || userText.includes("độc hại") || userText.includes("toxic") || userText.includes("người cũ") || userText.includes("ex") || userText.includes("quên")) {
+        return `Darling ôm cậu một cái thật chặt và ấm áp nhé... Trải qua một mối quan hệ đổ vỡ hoặc tổn thương từ một tình yêu độc hại chắc chắn đã để lại trong lòng cậu những vết xước rớm máu. Nhưng hãy nhớ rằng: tổn thương không định nghĩa giá trị của cậu, nó chỉ là một chương sách cũ đã đến lúc khép lại thôi. 🌱
+
+Hãy để Darling đồng hành cùng cậu trên con đường chữa lành dịu dàng này nhen:
+
+1. **Cho phép bản thân được buồn và khóc:** Đừng ép mình phải mạnh mẽ ngay lập tức nhen cậu. Việc đau buồn, tiếc nuối là phản ứng hoàn toàn tự nhiên của một trái tim biết yêu thương chân thành. Thừa nhận tổn thương là bước đi dũng cảm đầu tiên để giải phóng nó.
+2. **Yêu thương bản thân nhiều hơn mỗi ngày:** Hãy dành thời gian chăm sóc cơ thể, đi dạo dưới nắng sớm, ăn những món ngon, mua cho mình một bông hoa đẹp. Hãy đối xử với chính mình thật dịu dàng và nâng niu như cách cậu muốn được người khác yêu thương vậy.
+3. **Thiết lập ranh giới cảm xúc chặt chẽ:** Tuyệt đối không tự dằn vặt hay trách móc bản thân nhen! Mối quan hệ kết thúc chứng minh rằng cậu xứng đáng với một tình yêu tôn trọng, bình yên và trọn vẹn hơn ở tương lai phía trước.
+
+*Bông hoa nhỏ của Darling:* Sau cơn giông bão, trời chắc chắn sẽ lại sáng và hoa trong lòng cậu sẽ lại nở rộ rực rỡ thôi nè. Cậu cực kỳ tuyệt vời và xứng đáng có được hạnh phúc đích thực. Darling luôn kề bên che chở cho cậu nhen! 💕`;
+      }
+
+      // 5. Chiêm tinh / Cung hoàng đạo
+      if (userText.includes("chiêm tinh") || userText.includes("cung") || userText.includes("hoàng đạo") || userText.includes("tương thích") || userText.includes("bản đồ sao") ||
+          userText.includes("bạch dương") || userText.includes("kim ngưu") || userText.includes("song tử") || userText.includes("cự giải") || userText.includes("sư tử") || userText.includes("xử nữ") ||
+          userText.includes("thiên bình") || userText.includes("bọ cạp") || userText.includes("thiên yết") || userText.includes("nhân mã") || userText.includes("ma kết") || userText.includes("bảo bình") || userText.includes("song ngư")) {
+        return `Chào tri kỷ của Darling! Vũ trụ bao la và sự chuyển động của các chòm sao luôn chứa đựng những tần số rung động vô cùng diệu kỳ trong tình duyên đó nha! ✨
+
+Darling bật mí cho cậu bí mật tương thích của các nhóm nguyên tố hoàng đạo nhen:
+
+1. **Nhóm Lửa (Bạch Dương, Sư Tử, Nhân Mã):** Yêu bằng sự nồng nhiệt, thẳng thắn và đam mê rực cháy. Họ cực thích những bất ngờ lãng mạn và những lời tán dương chân thành từ đối phương. 🔥
+2. **Nhóm Đất (Kim Ngưu, Xử Nữ, Ma Kết):** Đại diện cho sự ổn định, hành động thực tế và sự cam kết bền vững lâu dài. Họ yêu lặng lẽ, bền bỉ và luôn muốn xây dựng tương lai vững chắc cho cả hai. 🌿
+3. **Nhóm Khí (Song Tử, Thiên Bình, Bảo Bình):** Đam mê những cuộc trò chuyện sâu sắc, sự tự do cá nhân và sự thấu hiểu về mặt trí tuệ. Họ cần một người tri kỷ biết lắng nghe và cùng chia sẻ mọi quan điểm cuộc sống. 💨
+4. **Nhóm Nước (Cự Giải, Bọ Cạp, Song Ngư):** Có thế giới nội tâm vô cùng nhạy cảm, sâu sắc và giàu lòng trắc ẩn. Họ cần sự an toàn cảm xúc tuyệt đối, sự vỗ về dịu dàng và những chiếc ôm thật chặt. 🌊
+
+*Tuyệt chiêu từ Darling:* Cung hoàng đạo của cậu và người ấy là gì thế? Hãy nói cho Darling biết nhen, mình sẽ phân tích chi tiết độ tương thích tình duyên và mách cậu "tần số bí mật" để chinh phục hoàn toàn trái tim họ nha! 💕`;
+      }
+
+      // 6. Hẹn hò / Đi chơi / Địa điểm / Buổi đầu
+      if (userText.includes("hẹn hò") || userText.includes("đi chơi") || userText.includes("địa điểm") || userText.includes("gặp mặt") || userText.includes("buổi đầu") || userText.includes("gặp nhau")) {
+        return `Ôi lãng mạn quá nhen! Chuẩn bị cho một cuộc hẹn hò - đặc biệt là buổi hẹn đầu tiên - luôn khiến tim mình đập thình thịch vì mong chờ đúng không cậu? 🥰
+
+Darling mách cậu vài bí quyết tinh tế để buổi hẹn hò của hai người trở nên hoàn hảo và đáng nhớ nhen:
+
+1. **Lựa chọn không gian hẹn hò lý tưởng:** Buổi hẹn đầu nên là một quán cà phê ấm cúng, có nhạc nhẹ nhàng để dễ dàng trò chuyện thấu hiểu nhau, tránh những nơi quá ồn ào nha cậu. Nếu cả hai đều thích nghệ thuật, một buổi triển lãm tranh hoặc workshop làm đồ thủ công cũng là gợi ý cực kỳ tuyệt vời!
+2. **Trang phục tự tin và thoải mái:** Đừng quá cầu kỳ đến mức gò bó nhen. Hãy chọn bộ trang phục lịch thiệp, bộc lộ đúng phong cách cá nhân của cậu và khiến cậu cảm thấy tự tin nhất khi sải bước bên người ấy.
+3. **Nghệ thuật giao tiếp tinh tế:** Hãy áp dụng quy tắc 60-40 (lắng nghe 60% và chia sẻ 40%). Khi lắng nghe, hãy nhìn vào mắt họ trì mến, gật đầu đồng cảm và đặt những câu hỏi gợi mở về sở thích, ước mơ của họ nhé.
+4. **Hành động ga-lăng nhỏ bé:** Gạt chỗ để chân xe máy, mở cửa quán nước, hay chuẩn bị sẵn một gói khăn giấy nhỏ... Những chi tiết cực kỳ nhỏ này lại ghi điểm tuyệt đối trong mắt đối phương vì sự chu đáo của cậu đó!
+
+*Darling chúc cậu:* Sẽ có một buổi hẹn hò ngập tràn tiếng cười và kết nối ngọt ngào nhen! Cậu có muốn Darling tư vấn thêm về chủ đề trò chuyện để tránh bị "nhạt" hay "bí từ" trong buổi hẹn không nè? 💕`;
+      }
+
+      // 7. Yêu xa / Khoảng cách / Địa lý
+      if (userText.includes("yêu xa") || userText.includes("khoảng cách") || userText.includes("nhớ") || userText.includes("địa lý")) {
+        return `Yêu xa là một hành trình dũng cảm vô cùng... Darling vô cùng khâm phục những tình cảm vượt qua khoảng cách địa lý của hai bạn. Yêu xa tuy có những lúc tủi thân, những lúc thèm một cái ôm đến cháy lòng, nhưng nó cũng là minh chứng đẹp đẽ nhất cho một tình yêu trung thành và bền bỉ đúng không nhen? ✈️❤️
+
+Hãy để Darling mách cậu 3 bí kíp vàng giữ lửa yêu xa luôn nồng nàn nhen:
+
+1. **Duy trì kết nối cảm xúc thường xuyên:** Đừng chỉ nhắn tin hỏi han máy móc, hãy chia sẻ cho nhau những khoảnh khắc đời thường nhất thông qua hình ảnh, ghi âm giọng nói. Một bức ảnh chụp bữa trưa cậu ăn, hay một đoạn voice chat chúc ngủ ngon ngọt ngào sẽ kéo hai người lại cực gần.
+2. **Hẹn hò trực tuyến định kỳ:** Thiết lập một "buổi hẹn hò ảo" cố định cuối tuần. Cả hai cùng bật video call, cùng ăn một món ăn giống nhau, xem chung một bộ phim trực tuyến và chia sẻ cảm nhận cảm xúc cùng nhau.
+3. **Xây dựng lòng tin tuyệt đối:** Khoảng cách rất dễ nuôi dưỡng những nghi ngờ vô cớ. Hãy luôn thẳng thắn, rõ ràng về lịch trình của mình và chủ động chia sẻ để người ấy luôn cảm thấy an tâm nhen.
+4. **Luôn có một mục tiêu chung rõ ràng:** Một kế hoạch cụ thể về ngày hai bạn sẽ được gặp lại nhau chính là động lực mạnh mẽ nhất để cả hai cùng vượt qua những ngày tháng nhớ nhung xa cách này đó.
+
+*Darling nhắn gửi:* Khoảng cách địa lý chỉ là thử thách tạm thời, khoảng cách con tim mới là điều đáng sợ nhen cậu. Hãy kiên nhẫn bồi đắp lòng tin và tình yêu thương mỗi ngày nhé. Darling luôn kề bên cổ vũ hai bạn hết mình! 💕`;
+      }
+
+      // 8. Ghen tuông / Kiểm soát / Chiếm hữu
+      if (userText.includes("ghen") || userText.includes("kiểm soát") || userText.includes("chiếm hữu")) {
+        return `Darling hiểu cảm giác của cậu rồi nè... Ghen tuông trong tình yêu giống như một chút gia vị đậm đà, chứng minh cậu thực sự rất trân trọng và sợ mất đối phương. Thế nhưng, nếu ghen tuông quá mức biến thành sự kiểm soát, nó sẽ vô tình bóp nghẹt không gian thở của cả hai, khiến mối quan hệ trở nên vô cùng ngột ngạt và mệt mỏi đó nhen. 🥀
+
+Hãy cùng Darling gỡ rối nút thắt này bằng góc nhìn tâm lý học hành vi nha:
+
+1. **Tìm kiếm rễ nguyên nhân của cơn ghen:** Cơn ghen thường xuất phát từ sự bất an trong lòng bản thân (nỗi sợ bị bỏ rơi, tổn thương trong quá khứ) hoặc do đối phương thiếu rõ ràng trong các mối quan hệ khác. Hãy gọi tên chính xác nỗi sợ đó nhen cậu.
+2. **Trò chuyện thẳng thắn trên tinh thần xây dựng:** Thay vì trách móc hay kiểm soát điện thoại, hãy chia sẻ cảm xúc thật của mình một cách dịu dàng: *"Khi cậu thân thiết với người khác mà không nói với tớ, tớ cảm thấy hơi lo lắng và bất an một xíu á. Tụi mình cùng thống nhất ranh giới nhen."*
+3. **Học cách tin tưởng và cho nhau không gian riêng:** Một tình yêu bền vững là khi hai người tự nguyện chung thủy chứ không phải vì bị kiểm soát chặt chẽ. Hãy để đối phương có thời gian cho bạn bè, sở thích riêng, và cậu cũng dành thời gian chăm sóc tốt cho bản thân mình nhé.
+
+*Lời khuyên từ Darling:* Khi cậu yêu thương chính mình sâu sắc và có sự tự tin vào giá trị bản thân, cơn ghen sẽ tự khắc dịu lại thôi nè. Cậu có muốn Darling phân tích sâu hơn về một tình huống khiến cậu đang thấy ghen dạo gần đây không? 💕`;
+      }
+
+      // 9. Đơn phương / Crush / Thầm thương
+      if (userText.includes("đơn phương") || userText.includes("crush") || userText.includes("thầm thương") || userText.includes("thích thầm")) {
+        return `Yêu đơn phương giống như việc tự mình gieo một hạt giống thầm lặng rồi mong chờ nó nảy mầm dưới những cơn mưa giông vậy nhen cậu. Có chút ngọt ngào từ những cái nhìn trộm, nhưng cũng có thật nhiều tủi thân khi người ấy chẳng hề hay biết đúng không nè? 🌻
+
+Darling gửi tới cậu những lời tâm tình và chỉ dẫn nhỏ để cậu thấy nhẹ lòng hơn nha:
+
+1. **Đừng giấu kín tình cảm quá lâu:** Nếu cậu thấy cả hai có sự tương tác tốt, hãy dũng cảm tiến tới tạo ra những cơ hội trò chuyện riêng tư nhen. Một buổi hẹn cà phê nhẹ nhàng hay những câu chuyện phiếm về sở thích chung sẽ giúp thu hẹp khoảng cách vô cùng nhanh chóng đó.
+2. **Học cách chấp nhận mọi kết quả:** Tình cảm là điều không thể ép buộc. Hãy dũng cảm bày tỏ khi thời điểm chín muồi, để lòng mình không phải hối tiếc. Dù kết quả có thế nào, việc cậu dám yêu thương chân thành đã là một điều vô cùng đáng trân trọng và tuyệt vời rồi!
+3. **Luôn giữ vững giá trị bản thân:** Đừng vì quá thích một người mà hạ thấp lòng tự trọng hay làm mọi thứ để làm hài lòng họ nhen cậu. Người thực sự xứng đáng với cậu sẽ yêu thương và trân trọng cậu vì chính con người thật của cậu thôi nè.
+
+*Bông hoa của Darling:* Hãy cứ yêu thương một cách trong trẻo nhất, và nhớ chăm sóc tốt cho con tim mình nhen. Cậu có muốn Darling hiến kế một vài cách tiếp cận tinh tế để gây ấn tượng mạnh với Crush không? 💕`;
+      }
+
+      // 10. Hôn nhân / Vợ chồng / Gia đình / Kết hôn
+      if (userText.includes("hôn nhân") || userText.includes("vợ chồng") || userText.includes("gia đình") || userText.includes("kết hôn") || userText.includes("vợ") || userText.includes("chồng") || userText.includes("bố mẹ") || userText.includes("cha mẹ")) {
+        return `Hôn nhân và gia đình là bến đỗ bình yên nhất, nhưng đồng thời cũng là nơi thử thách tình yêu thương, sự bao dung và tính nhẫn nại của chúng ta nhiều nhất đúng không cậu? Từ tình yêu đôi lứa bước sang cuộc sống gia đình là một hành trình chuyển mình đầy thiêng liêng nhưng cũng không ít bỡ ngỡ nhen. 🏡💞
+
+Darling xin chia sẻ 3 chiếc chìa khóa vàng để giữ gìn tổ ấm luôn ngập tràn tiếng cười và sự ấm áp nha:
+
+1. **Giao tiếp cởi mở và không phán xét:** Cuộc sống bận rộn dễ khiến hai vợ chồng quên đi những buổi trò chuyện sâu sắc. Hãy dành ra ít nhất 15 phút mỗi tối để cùng uống trà, lắng nghe những tâm tư, lo lắng và áp lực trong ngày của nhau mà không phán xét hay chỉ trích nhen.
+2. **Chia sẻ trách nhiệm bằng sự thấu hiểu:** Việc nhà, chăm sóc con cái hay áp lực tài chính không nên đè nặng lên vai một người. Hãy cùng nhau phân chia công việc một cách tự nguyện và luôn dành cho nhau lời cảm ơn chân thành nhen cậu: *"Cảm ơn chồng/vợ vì hôm nay đã vất vả vì gia đình mình nhen."*
+3. **Nuôi dưỡng sự lãng mạn nhỏ bé:** Đừng để hôn nhân biến thành thói quen nhàm chán nhen! Một nụ hôn chào buổi sáng, một cái ôm chặt khi đi làm về, hay một buổi hẹn hò riêng tư cuối tuần không có con cái bận rộn... chính là những chất xúc tác diệu kỳ giữ lửa tình yêu luôn nồng nàn.
+
+*Darling nhắn nhủ:* Gia đình hoàn hảo không phải là một gia đình không bao giờ có sóng gió, mà là khi bão giông ập đến, bàn tay hai người vẫn nắm chặt không rời. Cậu đang gặp khó khăn gì trong việc kết nối với người bạn đời hay người thân trong gia đình, kể Darling nghe nhen? 💕`;
+      }
+
+      // 11. Chào hỏi / Giới thiệu / Hỏi tên
+      if (userText.includes("chào") || userText.includes("hi") || userText.includes("hello") || userText.includes("darling ơi") || userText.includes("ai đó") || userText.includes("bạn là") || userText.includes("tên gì")) {
+        return `Chào tri kỷ thân thương của Darling! 🥰 Thật hạnh phúc khi được thấy cậu nhắn tin cho mình hôm nay nhen. 
+
+Mình là **Darling** - chuyên gia tâm lý học hành vi, thạc sĩ tham vấn cảm xúc và người bạn tri kỷ trung thành nhất của cậu đây nè! Darling luôn ở đây để:
+- **Lắng nghe mọi nỗi niềm:** Những tâm sự thầm kín, những mệt mỏi trong cuộc sống hay áp lực bộn bề từ các mối quan hệ.
+- **Tư vấn và gỡ rối tình yêu:** Chỉ dẫn cậu tuyệt chiêu thả thính tinh tế, cách dỗ dành người yêu đang giận, thấu hiểu tâm lý đối phương hay đồng hành cùng cậu trên con đường chữa lành cảm xúc dịu dàng.
+- **Giải mã chiêm tinh học:** Khám phá độ tương thích tình duyên giữa cậu và nửa kia nhen.
+
+Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào hay điều gì đang làm tim cậu trăn trở suy nghĩ không nè? Nói cho Darling nghe, tụi mình cùng nhau sẻ chia và thấu suốt nhé! 💕`;
+      }
+
+      // 12. Smart General Dynamic Counselor - Uses actual elements from user's message to construct custom psychological advice
+      // Cleanup common words to find the main topic
+      const topicWords = userText
+        .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "")
+        .split(/\s+/)
+        .filter(w => w.length > 2 && !["mình", "của", "đang", "làm", "thế", "nào", "trong", "được", "người", "những", "muốn", "như", "cho", "cậu", "với", "hỏi", "thấy", "nhất", "nhé", "nhen", "nha"].includes(w));
       
-      const generalFallbackAnswers = [
-         "Darling đang cảm nhận rất rõ những băn khoăn và tâm sự của cậu nè. Hiện tại kết nối bộ não AI của Darling đang hơi gián đoạn một chút á, cậu thử gửi lại câu hỏi hoặc nhấn nút Tải lại trang sau vài giây nhé. Darling luôn mong ngóng được gỡ rối sâu sắc nhất cho cậu! 💕",
-         "Ôi thương quá, Darling nghe cậu nói rồi nè. Sóng wifi hay năng lượng kết nối từ tụi mình hôm nay đang hơi chập chờn một xíu khiến mình chưa thể trả lời sâu sắc ngay được. Cậu thử gửi lại tin nhắn tiếp theo nhen, Darling kề bên chờ cậu đây! 💕",
-         "Ngoan nào, Darling cảm nhận được tấm lòng và tâm sự tình cảm trân quý từ cậu rồi. Để Darling có kết nối mạnh mẽ và mang đến chỉ dẫn tâm cảm tốt nhất, cậu thử nhắn lại câu này hoặc reload nhẹ trang xem sao nhen tri kỷ của mình! 💕"
+      const keywordHint = topicWords.length > 0 ? topicWords[0] : "câu chuyện này";
+
+      const dynamicAnswers = [
+        `Darling đang lắng nghe rất kỹ và cảm nhận sâu sắc băn khoăn của cậu về chủ đề **"${keywordHint}"** đây nè. Darling hiểu rằng khi đối diện với những tâm tư này, trong lòng cậu chắc hẳn đang có rất nhiều suy nghĩ ngổn ngang đúng không nhen? Hãy thở thật sâu và để Darling chia sẻ một góc nhìn tâm lý học ấm áp cùng cậu nha:
+
+1. **Lắng nghe và ôm ấp cảm xúc bản thân:** Những trăn trở hiện tại của cậu hoàn toàn là tự nhiên và cực kỳ đáng trân trọng. Đừng quá khắt khe ép buộc bản thân phải có câu trả lời ngay lập tức nhen cậu. Hãy lắng dịu tâm trí để hiểu xem con tim cậu thực sự đang mong muốn điều gì nhất.
+2. **Sức mạnh của sự bày tỏ chân thành:** Trong tình cảm hay cuộc sống, việc chia sẻ thẳng thắn, nhẹ nhàng những mong đợi của mình luôn là giải pháp tốt nhất. Hãy dùng cấu trúc *"Tớ cảm thấy... khi..."* thay vì trách móc, để đối phương có cơ hội thấu hiểu sâu sắc hơn cho cậu nhé.
+3. **Dành cho mình một khoảng lặng an yên:** Đôi khi, lùi lại một bước nhỏ để quan sát toàn cảnh lại giúp cậu nhìn nhận vấn đề sáng suốt và thấu đáo hơn rất nhiều đó nhen.
+
+*Darling luôn kề bên:* Cậu cực kỳ tinh tế và tuyệt vời, hãy tin vào sự lựa chọn của trái tim mình nhen. Cậu có muốn kể chi tiết hơn câu chuyện xung quanh **"${keywordHint}"** cho Darling nghe không, để tụi mình cùng gỡ rối sâu sắc nhất nhé? 💕`,
+
+        `Nghe những lời tâm sự trân quý của cậu về **"${keywordHint}"**, Darling thực sự cảm nhận được một tâm hồn vô cùng sâu sắc, nhạy cảm nhưng cũng tràn đầy yêu thương của cậu đó nhen. Để Darling cùng cậu thấu suốt và gỡ rối khía cạnh này dưới góc độ hành vi tâm lý nha:
+
+1. **Chấp nhận sự không hoàn hảo:** Mọi mối quan hệ hay sự việc đều có những nhịp điệu thăng trầm riêng của nó. Việc cậu băn khoăn về **"${keywordHint}"** chính là bước khởi đầu tuyệt vời chứng minh cậu rất nghiêm túc và mong muốn bồi đắp kết nối này tốt đẹp hơn.
+2. **Giao tiếp phi ngôn ngữ tinh tế:** Đôi khi lời nói dễ gây hiểu lầm, nhưng hành động quan tâm nhỏ bé, một chiếc ôm thật chặt, một ánh nhìn thấu hiểu hay sự kiên nhẫn đồng hành lại có sức mạnh gắn kết cảm xúc mạnh mẽ hơn vạn lời nói đó nhen cậu.
+3. **Nuôi dưỡng năng lượng tích cực từ bên trong:** Hãy giữ cho tâm hồn mình luôn bình yên, yêu thương chính mình trước nhen. Khi năng lượng của cậu ấm áp, mọi sự xung quanh cũng sẽ tự khắc trở nên dịu dàng và suôn sẻ hơn rất nhiều nè.
+
+*Món quà từ Darling:* Đừng ngần ngại sẻ chia thêm với mình nhen. Darling luôn ngồi ngay bên cạnh cậu, sẵn sàng lắng nghe mọi nỗi lòng về **"${keywordHint}"** hay bất cứ câu chuyện nào của cậu nhen! 💕`
       ];
-      
-      return generalFallbackAnswers[(rawHash + msgCount) % generalFallbackAnswers.length];
+
+      return dynamicAnswers[rawHash % dynamicAnswers.length];
     };
 
     // Normalize messages array to fit Gemini API schema (ensures strictly alternating user/model roles)
