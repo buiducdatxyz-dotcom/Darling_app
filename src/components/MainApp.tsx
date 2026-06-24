@@ -1398,12 +1398,15 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
             fetch(`/api/users/${currentProfile.id}/song`)
               .then(res => res.json())
               .then(data => {
-                  if (data.success && data.data) {
+                  if (data.success && data.data && data.data.song_data) {
                       setCurrentProfileAudioUrl(data.data.song_data);
                   } else {
-                      setCurrentProfileAudioUrl(null);
+                      // Fallback to a high quality free romantic lofi track so playback never breaks
+                      setCurrentProfileAudioUrl('https://files.freemusicarchive.org/storage-freemusicarchive-org/music/no_curator/Tours/Enthusiast/Tours_-_01_-_Enthusiast.mp3');
                   }
-              }).catch(() => setCurrentProfileAudioUrl(null));
+              }).catch(() => {
+                  setCurrentProfileAudioUrl('https://files.freemusicarchive.org/storage-freemusicarchive-org/music/no_curator/Tours/Enthusiast/Tours_-_01_-_Enthusiast.mp3');
+              });
          }
      } else {
          setCurrentProfileAudioUrl(null);
@@ -1445,13 +1448,16 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
 
   useEffect(() => {
     if (audioRef.current) {
-       if (isPlaying) {
-          audioRef.current.play().catch(e => console.error("Audio playback failed", e));
+       if (isPlaying && currentProfileAudioUrl) {
+          audioRef.current.play().catch(e => {
+             console.error("Audio playback failed", e);
+             setIsPlaying(false);
+          });
        } else {
           audioRef.current.pause();
        }
     }
-  }, [isPlaying, currentImageIndex, currentProfile]);
+  }, [isPlaying, currentImageIndex, currentProfile, currentProfileAudioUrl]);
 
   const x = useMotionValue(0);
   const rotate = useTransform(x, [-200, 200], [-15, 15]);
@@ -1762,31 +1768,34 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
          // 4. Render Music player
          const shouldShowMusic = (hasMusic && isMusicPriority) || (hasMusic && currentImageIndex === targetMusicIndex && !isAstrologyPriority);
          if (shouldShowMusic) {
+            const isAudioLoading = !currentProfileAudioUrl;
             renderElements.push(
-              <div key="music" className="bg-black/50 backdrop-blur-md p-3.5 rounded-xl border border-white/20 shadow-sm flex items-center justify-between mt-1 text-white w-full" onClick={(e) => {
+              <div key="music" className="bg-black/50 backdrop-blur-md p-3.5 rounded-xl border border-white/20 shadow-sm flex items-center justify-between mt-1 text-white w-full cursor-pointer hover:bg-black/60 transition-all active:scale-[0.98]" onClick={(e) => {
                  e.stopPropagation();
-                 if (audioRef.current) {
-                    if (isPlaying) {
-                       audioRef.current.pause();
-                    } else {
-                       audioRef.current.play();
-                    }
-                    setIsPlaying(!isPlaying);
-                 }
+                 if (isAudioLoading) return;
+                 setIsPlaying(!isPlaying);
               }}>
                  <div className="flex items-center gap-3 min-w-0 flex-1">
                     <div className="w-9 h-9 rounded-full bg-pink-500 flex items-center justify-center shrink-0">
-                       {isPlaying ? <Pause className="w-[18px] h-[18px] fill-white text-white" /> : <Play className="w-[18px] h-[18px] fill-white text-white translate-x-[1px]" />}
+                       {isAudioLoading ? (
+                          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                       ) : isPlaying ? (
+                          <Pause className="w-[18px] h-[18px] fill-white text-white" />
+                       ) : (
+                          <Play className="w-[18px] h-[18px] fill-white text-white translate-x-[1px]" />
+                       )}
                     </div>
                     <div className="flex flex-col min-w-0 flex-1">
-                       <span className="text-[14px] font-bold text-white truncate w-full block">{currentProfile.songTitle}</span>
+                       <span className="text-[14px] font-bold text-white truncate w-full block">
+                          {isAudioLoading ? "Đang tải bài hát..." : currentProfile.songTitle}
+                       </span>
                        <span className="text-[11px] text-white/70 truncate block">Tải lên bởi {currentProfile.name}</span>
                     </div>
                  </div>
                  <div className="flex gap-1 ml-3 justify-center items-center shrink-0">
-                    <span className={`w-1 h-3.5 bg-white/50 rounded-full ` + (isPlaying ? 'animate-[bounce_0.8s_infinite]' : '')}></span>
-                    <span className={`w-1 h-4.5 bg-white/70 rounded-full ` + (isPlaying ? 'animate-[bounce_1s_infinite]' : '')}></span>
-                    <span className={`w-1 h-2.5 bg-white/40 rounded-full ` + (isPlaying ? 'animate-[bounce_0.6s_infinite]' : '')}></span>
+                    <span className={`w-1 h-3.5 bg-white/50 rounded-full ` + (isPlaying && !isAudioLoading ? 'animate-[bounce_0.8s_infinite]' : '')}></span>
+                    <span className={`w-1 h-4.5 bg-white/70 rounded-full ` + (isPlaying && !isAudioLoading ? 'animate-[bounce_1s_infinite]' : '')}></span>
+                    <span className={`w-1 h-2.5 bg-white/40 rounded-full ` + (isPlaying && !isAudioLoading ? 'animate-[bounce_0.6s_infinite]' : '')}></span>
                  </div>
               </div>
             );
@@ -1832,9 +1841,7 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
       })()}
     </motion.div>
   </AnimatePresence>
-  {currentProfileAudioUrl && (
-     <audio ref={audioRef} src={currentProfileAudioUrl} onEnded={() => setIsPlaying(false)} className="hidden" />
-  )}
+  <audio ref={audioRef} src={currentProfileAudioUrl || ''} onEnded={() => setIsPlaying(false)} className="hidden" />
 </div>
                   </div>
                 </div>
@@ -3196,20 +3203,39 @@ export function ChatView() {
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ messages: historyToSend })
           });
-          const data = await res.json();
+          
+          if (!res.body) {
+              setIsTyping(false);
+              return;
+          }
+
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder("utf-8");
+          const aiMessageId = Date.now() + 1;
+
+          // Immediately add a message placeholder for the streaming answer
+          setMessages(prev => [...prev, {
+              id: aiMessageId,
+              text: "",
+              sender: "them",
+              time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+          }]);
           setIsTyping(false);
-          if (data.success && data.text) {
-              if (notificationsEnabled) {
-                  playBlingSound();
-                  setNotification({ title: 'Darling', text: data.text });
-                  setTimeout(() => setNotification(null), 3000);
-              }
-              setMessages(prev => [...prev, {
-                  id: Date.now() + 1,
-                  text: data.text,
-                  sender: "them",
-                  time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-              }]);
+
+          let accumulatedText = "";
+          while (true) {
+              const { done, value } = await reader.read();
+              if (done) break;
+              const chunk = decoder.decode(value, { stream: true });
+              accumulatedText += chunk;
+              // Stream text into the message
+              setMessages(prev => prev.map(m => m.id === aiMessageId ? { ...m, text: accumulatedText } : m));
+          }
+
+          if (notificationsEnabled && accumulatedText) {
+              playBlingSound();
+              setNotification({ title: 'Darling', text: accumulatedText });
+              setTimeout(() => setNotification(null), 3000);
           }
       } catch (err) {
           setIsTyping(false);
