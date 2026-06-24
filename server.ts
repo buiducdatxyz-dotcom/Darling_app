@@ -755,50 +755,70 @@ Nhiệm vụ cốt lõi & Quy tắc phản hồi khắt khe:
     try {
        const aiClient = getGemini();
 
-       const callAIWithTimeout = async () => {
-          try {
-             // First try with Google Search grounding
-             console.log("Attempting Gemini call with Google Search grounding...");
-             return await aiClient.models.generateContent({
-                model: 'gemini-3.5-flash',
-                contents: cleanMessages,
-                config: {
-                   systemInstruction: systemInstruction,
-                   temperature: 0.75,
-                   tools: [{ googleSearch: {} }]
-                }
-             });
-          } catch (searchError: any) {
-             console.warn("Gemini call with Google Search failed, immediately retrying without search tool:", searchError.message || searchError);
-             // Retry without tools
-             return await aiClient.models.generateContent({
-                model: 'gemini-3.5-flash',
-                contents: cleanMessages,
-                config: {
-                   systemInstruction: systemInstruction,
-                   temperature: 0.75
-                }
-             });
-          }
-       };
+        const lastUserMessage = cleanMessages[cleanMessages.length - 1]?.parts?.[0]?.text?.toLowerCase() || "";
+        const needsSearch = lastUserMessage.includes("trend") || 
+                            lastUserMessage.includes("hot") || 
+                            lastUserMessage.includes("mới nhất") || 
+                            lastUserMessage.includes("tin tức") || 
+                            lastUserMessage.includes("ngày nay") || 
+                            lastUserMessage.includes("năm 2026") || 
+                            lastUserMessage.includes("tìm kiếm") || 
+                            lastUserMessage.includes("google");
 
-       const timeoutPromise = new Promise<never>((_, reject) => {
-          setTimeout(() => reject(new Error("Timeout calling Gemini")), 60000);
-       });
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.setHeader('Transfer-Encoding', 'chunked');
 
-       const response = await Promise.race([callAIWithTimeout(), timeoutPromise]) as any;
-       res.json({ success: true, text: response.text });
-    } catch (e: any) {
-       console.warn("Using expert advice fallback due to Gemini error or timeout:", e);
-       try {
-         fs.writeFileSync("./gemini_error.log", JSON.stringify({
-           message: e?.message || String(e),
-           stack: e?.stack || "",
-           error: String(e)
-         }, null, 2));
-       } catch(err) {}
-       const fallbackText = getFallbackAdvice(cleanMessages);
-       res.json({ success: true, text: fallbackText });
+        if (needsSearch) {
+           try {
+              console.log("User requested search-related topic, using Google Search grounding (streaming)...");
+              const searchStream = await aiClient.models.generateContentStream({
+                 model: 'gemini-3.5-flash',
+                 contents: cleanMessages,
+                 config: {
+                    systemInstruction: systemInstruction,
+                    temperature: 0.75,
+                    tools: [{ googleSearch: {} }]
+                 }
+              });
+
+              for await (const chunk of searchStream) {
+                 if (chunk.text) {
+                    res.write(chunk.text);
+                 }
+              }
+              return res.end();
+           } catch (searchError) {
+              console.warn("Search grounding streaming failed, falling back to direct model...", searchError.message || searchError);
+           }
+        }
+
+        const responseStream = await aiClient.models.generateContentStream({
+           model: 'gemini-3.5-flash',
+           contents: cleanMessages,
+           config: {
+              systemInstruction: systemInstruction,
+              temperature: 0.75
+           }
+        });
+
+        for await (const chunk of responseStream) {
+           if (chunk.text) {
+              res.write(chunk.text);
+           }
+        }
+        res.end();
+     } catch (e) {
+        console.warn("Using expert advice fallback due to Gemini streaming error:", e);
+        try {
+          fs.writeFileSync("./gemini_error.log", JSON.stringify({
+            message: e?.message || String(e),
+            stack: e?.stack || "",
+            error: String(e)
+          }, null, 2));
+        } catch(err) {}
+        const fallbackText = getFallbackAdvice(cleanMessages);
+        res.write(fallbackText);
+        res.end();
     }
   });
 
