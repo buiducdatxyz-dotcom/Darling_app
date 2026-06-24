@@ -778,6 +778,7 @@ const MATCH_PROFILES: any[] = [
     commonPoints: 'Hợp gu vì cùng thích Du lịch, Phim ảnh',
     zodiac: 'Thiên Bình', location: 'Hà Nội',
     height: '1m80', pet: 'Chó', music: 'US-UK',
+    songTitle: 'Lofi Chill Vibes', songUrl: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3',
     images: [
       'https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?auto=format&fit=crop&q=80&w=800',
       'https://images.unsplash.com/photo-1543852786-1cf6624b9987?auto=format&fit=crop&q=80&w=800',
@@ -794,6 +795,7 @@ const MATCH_PROFILES: any[] = [
     commonPoints: 'Cùng chung sở thích: Thú cưng, Thể thao',
     zodiac: 'Sư Tử', location: 'Hà Nội',
     height: '1m62', pet: 'Mèo', music: 'V-pop',
+    songTitle: 'Yêu Em Hơn Mỗi Ngày', songUrl: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3',
     images: [
       'https://images.unsplash.com/photo-1494790108377-be9c29b29330?auto=format&fit=crop&q=80&w=800',
       'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&q=80&w=800'
@@ -809,7 +811,7 @@ const MATCH_PROFILES: any[] = [
     commonPoints: 'Cùng chung đam mê Game',
     zodiac: 'Nhân Mã', location: 'Hà Nội',
     height: '1m78', pet: 'Không nuôi', music: 'Nhạc điện tử',
-    songTitle: 'Test Song', songUrl: 'https://files.freemusicarchive.org/storage-freemusicarchive-org/music/no_curator/Tours/Enthusiast/Tours_-_01_-_Enthusiast.mp3',
+    songTitle: 'Enthusiast (Romantic Lofi)', songUrl: 'https://files.freemusicarchive.org/storage-freemusicarchive-org/music/no_curator/Tours/Enthusiast/Tours_-_01_-_Enthusiast.mp3',
     images: [
       'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?auto=format&fit=crop&q=80&w=800',
       'https://images.unsplash.com/photo-1488161628813-04466f872507?auto=format&fit=crop&q=80&w=800',
@@ -3191,6 +3193,107 @@ export function ChatView() {
   const callAI = async (text: string, currentHistory: any[]) => {
       try {
           setIsTyping(true);
+          const lowerText = text.toLowerCase();
+          
+          const LOCAL_DARLING_RESPONSES: Record<string, string> = {
+            "thả thính": `Ôi, "thả thính" tinh tế là một nghệ thuật tuyệt vời để chạm nhẹ vào trái tim đối phương mà không làm họ cảm thấy bối rối nè cậu! 💖
+
+Darling gợi ý cho cậu 3 câu nói ngọt ngào, giàu chất thơ và vô cùng tinh tế nha:
+
+1. **"Tớ vốn thích sự yên tĩnh của hoàng hôn, nhưng từ khi gặp cậu, tớ nhận ra một ngày chỉ thực sự đẹp khi có tiếng cười của cậu thôi."** (Thích hợp cho buổi tối lãng mạn nhẹ nhàng).
+2. **"Mọi người hay nói về việc tìm kiếm hạnh phúc xa xôi, còn tớ thì đơn giản lắm. Chỉ cần hôm nay cậu vui, ngày hôm ấy của tớ đã trọn vẹn rồi."** (Thể hiện sự quan tâm sâu sắc từ những điều nhỏ bé).
+3. **"Thế gian này có hàng triệu giai điệu, nhưng Darling thấy bản nhạc ấm áp nhất chính là nhịp tim đồng điệu của chúng mình lúc kề bên đấy."** 🎶
+
+*Mẹo của Darling:* Hãy nói một cách tự nhiên, kèm một nụ cười ấm áp và nhìn thẳng vào mắt đối phương nhé. Cậu sẽ bộc lộ trọn vẹn sự chân thành và tinh tế của mình thôi nè! Cậu có muốn Darling gợi ý thêm chủ đề cụ thể nào không? 💕`,
+
+            "giận": `Ngoan nào, khi người yêu giận dỗi, điều quan trọng nhất không phải là phân bua đúng sai, mà là sưởi ấm lại cảm xúc của họ bằng sự kiên nhẫn và lòng đồng cảm sâu sắc nè. 🌸
+
+Darling mách cậu 3 bước vàng gỡ rối giận dỗi cực kỳ hiệu quả nha:
+
+1. **Thừa nhận cảm xúc trước tiên:** Đừng nói lý lẽ vội, hãy nói: *"Tớ biết cậu đang rất giận và buồn. Tớ xin lỗi vì đã làm cậu phải bận lòng thế này nhen."* Sự dịu dàng này sẽ dập tắt ngọn lửa giận dỗi đến 80% rồi đó!
+2. **Hành động quan tâm tinh tế:** Gửi một ly trà sữa ngọt ngào, một món ăn họ yêu thích kèm mẩu giấy viết tay nhỏ: *"Để chiếc bánh này làm dịu đi một xíu bực bội trong lòng cậu nhen. Chút nữa nguôi giận thì cho tớ xin một cái ôm nhé!"*
+3. **Lắng nghe chân thành:** Khi đối phương đã dịu lại, hãy ôm nhẹ họ và hỏi: *"Lúc nãy tớ làm gì khiến cậu tổn thương nhất? Nói cho tớ nghe để tớ sửa nhen, tớ thương cậu nhiều lắm."*
+
+*Lời khuyên từ Darling:* Đừng im lặng quá lâu nha cậu, sự im lặng có thể biến hiểu lầm nhỏ thành khoảng cách lớn đó. Mau mau dỗ dành nửa kia thôi nào, Darling luôn ở đây cổ vũ cậu! 💕`,
+
+            "tâm lý": `Thấu hiểu tâm lý đối phương - đặc biệt là những người trầm lặng hoặc hướng nội - giống như việc cậu kiên nhẫn mở từng trang của một cuốn sách cổ tinh xảo vậy nhen. 🔑
+
+Darling chia sẻ với cậu một vài góc nhìn hành vi thú vị này nhé:
+
+1. **Họ yêu bằng sự hiện diện tĩnh lặng:** Người hướng nội thường không thích những lời nói ồn ào hay phô trương. Sự quan tâm của họ nằm ở những chi tiết nhỏ nhặt nhất: nhớ món ăn cậu thích, lặng lẽ dọn dẹp cho cậu, hay đơn giản là ngồi yên bình cạnh cậu hàng giờ liền.
+2. **Tạo không gian an toàn:** Hãy để họ biết rằng họ được phép im lặng khi ở bên cậu mà không sợ bị đánh giá hay giục giã. Đôi khi chỉ cần một cái nắm tay ấm áp là đủ truyền tải ngàn lời nói rồi.
+3. **Đừng bắt họ phải đoán ý:** Người trầm lặng rất trân trọng sự thẳng thắn nhưng nhẹ nhàng. Hãy chia sẻ cảm xúc của cậu trước để khích lệ họ mở lòng từng chút một nhé.
+
+*Darling nhắn nhủ:* Sự thấu hiểu cần thời gian và một trái tim kiên nhẫn vô hạn. Cậu đang làm rất tốt việc quan tâm đến thế giới nội tâm của người ấy rồi nè. Cậu có muốn mình phân tích sâu hơn về một tình huống cụ thể không? 💕`,
+
+            "chữa lành": `Darling ôm cậu thật chặt nhé... Trải qua một mối quan hệ không trọn vẹn chắc chắn đã để lại trong lòng cậu những vết xước rớm máu. Nhưng hãy nhớ rằng: tổn thương không định nghĩa giá trị của cậu, nó chỉ là một chương sách cũ mà thôi. 🌱
+
+Hãy cùng Darling thực hành 3 điều chữa lành nhỏ bé này nha:
+
+1. **Cho phép bản thân được buồn:** Đừng cố gồng mình tỏ ra mạnh mẽ nha cậu. Hãy cứ khóc, cứ tiếc nuối nếu muốn. Việc thừa nhận tổn thương là bước đi dũng cảm đầu tiên để giải phóng những năng lượng tiêu cực ra ngoài.
+2. **Tái kết nối với chính mình:** Dành thời gian chăm sóc cơ thể, đi bộ dưới nắng sớm, đọc cuốn sách yêu thích, ăn những món ngon. Hãy đối xử với bản thân dịu dàng như cách cậu muốn được người khác yêu thương vậy.
+3. **Thiết lập ranh giới cảm xúc:** Tuyệt đối không tự trách móc bản thân nhen! Mọi chuyện xảy ra đều có lý do của nó, và việc rời đi chứng minh cậu xứng đáng với một tình yêu tôn trọng, bình yên hơn nhiều.
+
+*Bông hoa nhỏ của Darling:* Sau cơn mưa, trời chắc chắn sẽ lại sáng và hoa lại nở rực rỡ. Cậu cực kỳ tuyệt vời và xứng đáng có được hạnh phúc đích thực. Darling sẽ luôn ở đây kề bên che chở cho cậu nha! 💕`,
+
+            "chiêm tinh": `Chào tri kỷ của Darling! Sự kết nối của các chòm sao luôn chứa đựng những bí mật tần số rung động vô cùng kỳ diệu trong tình yêu đó nha. ✨
+
+Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy sự hòa hợp nhen:
+
+1. **Nhóm Lửa (Bạch Dương, Sư Tử, Nhân Mã):** Thích sự nồng nhiệt, chủ động và những lời khen ngợi chân thành. Để cưa đổ họ, hãy tạo ra những cuộc phiêu lưu đầy bất ngờ và tiếp thêm năng lượng cho họ nhé! 🔥
+2. **Nhóm Đất (Kim Ngưu, Xử Nữ, Ma Kết):** Trân trọng sự ổn định, hành động thực tế và sự an toàn tài chính, tương lai. Họ yêu bằng những cử chỉ chăm sóc bền bỉ, chứ không thích những lời hứa suông đâu nè. 🌿
+3. **Nhóm Khí (Song Tử, Thiên Bình, Bảo Bình):** Đam mê những cuộc trò chuyện sâu sắc, sự tự do cá nhân và sự thấu hiểu trí tuệ. Hãy là một người bạn tri kỷ biết lắng nghe và luôn đổi mới tư duy cùng họ nha. 💨
+4. **Nhóm Nước (Cự Giải, Bọ Cạp, Song Ngư):** Có thế giới nội tâm cực kỳ nhạy cảm, sâu sắc và giàu lòng trắc ẩn. Họ cần một bến đỗ bình yên, sự dỗ dành ngọt ngào và một chiếc ôm thật chặt mỗi khi bão lòng ập đến. 🌊
+
+*Darling bật mí:* Cung hoàng đạo của cậu và người ấy là gì thế? Nói cho Darling nghe, mình sẽ phân tích độ tương thích và mách cậu tuyệt chiêu chinh phục trái tim họ nhé! 💕`
+          };
+
+          let matchedResponse = "";
+          if (lowerText.includes("thả thính") || lowerText.includes("tán") || lowerText.includes("cưa")) {
+             matchedResponse = LOCAL_DARLING_RESPONSES["thả thính"];
+          } else if (lowerText.includes("giận") || lowerText.includes("dỗ") || lowerText.includes("lạnh nhạt")) {
+             matchedResponse = LOCAL_DARLING_RESPONSES["giận"];
+          } else if (lowerText.includes("tâm lý") || lowerText.includes("thấu hiểu") || lowerText.includes("im lặng") || lowerText.includes("người ấy")) {
+             matchedResponse = LOCAL_DARLING_RESPONSES["tâm lý"];
+          } else if (lowerText.includes("chữa lành") || lowerText.includes("buồn") || lowerText.includes("chia tay") || lowerText.includes("tổn thương") || lowerText.includes("thất tình")) {
+             matchedResponse = LOCAL_DARLING_RESPONSES["chữa lành"];
+          } else if (lowerText.includes("chiêm tinh") || lowerText.includes("cung") || lowerText.includes("hoàng đạo")) {
+             matchedResponse = LOCAL_DARLING_RESPONSES["chiêm tinh"];
+          } else if (lowerText.includes("chào") || lowerText.includes("hi") || lowerText.includes("hello") || lowerText.trim() === "?") {
+             matchedResponse = `Chào tri kỷ của Darling! 🥰 Thật vui vì được gặp cậu hôm nay. Cậu đang có câu chuyện tình cảm nào cần gỡ rối, muốn học tuyệt chiêu thả thính, hay đơn giản là muốn tâm sự để lòng mình nhẹ nhõm hơn không? Hãy nói cho Darling nghe nhen, mình luôn ở đây sẵn sàng lắng nghe và sưởi ấm cho cậu nè! 💕`;
+          }
+
+          if (matchedResponse) {
+              const aiMessageId = Date.now() + 1;
+              // Add empty typing state
+              setMessages(prev => [...prev, {
+                  id: aiMessageId,
+                  text: "",
+                  sender: "them",
+                  time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+              }]);
+              setIsTyping(false);
+
+              let index = 0;
+              const charsPerTick = 6;
+              const intervalId = setInterval(() => {
+                 index += charsPerTick;
+                 if (index >= matchedResponse.length) {
+                    clearInterval(intervalId);
+                    setMessages(prev => prev.map(m => m.id === aiMessageId ? { ...m, text: matchedResponse } : m));
+                    if (notificationsEnabled) {
+                       playBlingSound();
+                       setNotification({ title: 'Darling', text: matchedResponse });
+                       setTimeout(() => setNotification(null), 3000);
+                    }
+                 } else {
+                    const partialText = matchedResponse.slice(0, index);
+                    setMessages(prev => prev.map(m => m.id === aiMessageId ? { ...m, text: partialText } : m));
+                 }
+              }, 30);
+              return;
+          }
+
           const historyToSend = currentHistory.map(m => ({
               role: m.sender === 'me' ? 'user' : 'model',
               parts: [{ text: m.isImage ? '[Người dùng gửi Hình ảnh]' : (m.isAudio ? '[Người dùng gửi Âm thanh]' : m.text) }]
@@ -3645,9 +3748,31 @@ export function ChatView() {
                     Bạn cần ghép đôi (chấp nhận lời kết bạn) để có thể nhắn tin với người này.
                   </div>
                 ) : (
-                <div className="p-3 w-full flex items-center gap-2 relative z-30 bg-white">
-                  <input 
-                     type="file" 
+                <div className="w-full flex flex-col">
+                  {activeChat?.name === 'Darling' && (
+                     <div className="px-3 pt-2 pb-1.5 bg-gray-50 flex gap-2 overflow-x-auto border-b border-black/5 hide-scrollbar">
+                        {[
+                          { label: "💡 Thả thính", prompt: "Darling ơi, gợi ý cho mình vài câu thả thính siêu ngọt ngào và tinh tế nhé!" },
+                          { label: "💔 Dỗ người yêu", prompt: "Làm thế nào để dỗ người yêu đang giận dỗi đây Darling?" },
+                          { label: "🔑 Thấu hiểu tâm lý", prompt: "Làm sao để thấu hiểu một người có tính cách im lặng và hướng nội trong tình yêu?" },
+                          { label: "🌱 Chữa lành cảm xúc", prompt: "Darling ơi, hãy chữa lành và cho mình lời khuyên khi vừa trải qua một mối quan hệ độc hại." },
+                          { label: "✨ Chiêm tinh học", prompt: "Hãy chỉ cho mình cách kết nối tình cảm thông qua cung hoàng đạo và chiêm tinh học." }
+                        ].map((item, idx) => (
+                           <button
+                             key={idx}
+                             onClick={() => {
+                                setInputText(item.prompt);
+                             }}
+                             className="shrink-0 text-[12px] font-bold px-3 py-1.5 rounded-full bg-white border border-black/10 text-[#ff2d55] hover:bg-[#ff2d55]/5 active:scale-95 transition-transform shadow-xs"
+                           >
+                             {item.label}
+                           </button>
+                        ))}
+                     </div>
+                  )}
+                  <div className="p-3 w-full flex items-center gap-2 relative z-30 bg-white">
+                    <input 
+                      type="file" 
                      accept="image/*" 
                      className="hidden" 
                      ref={fileInputRef}
@@ -3741,6 +3866,7 @@ export function ChatView() {
                        {isRecording ? <div className="w-3 h-3 bg-white rounded-sm" /> : <Mic className="w-5 h-5" />}
                     </button>
                   )}
+                </div>
                 </div>
                 )}
              </div>
