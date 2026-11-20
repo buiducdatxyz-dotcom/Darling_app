@@ -102,9 +102,13 @@ const replacement = `export function ChatView() {
           
           historyToSend.push({ role: 'user', parts: [{ text }] });
           
+          const token = sessionStorage.getItem('auth_token') || localStorage.getItem('auth_token');
           const res = await fetch('/api/chat/darling', {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: {
+                  'Content-Type': 'application/json',
+                  ...(token ? { Authorization: 'Bearer ' + token } : {})
+              },
               body: JSON.stringify({ messages: historyToSend })
           });
           const data = await res.json();

@@ -1,19 +1,23 @@
+import { apiFetch } from '../utils/api';
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, useMotionValue, useTransform, AnimatePresence } from 'motion/react';
 import { ViewState } from '../types';
-import { Smile, Users, Heart, MessageSquare, User, Star, ArrowLeft, X, Bookmark, Image as ImageIcon, Phone, Video, MoreVertical, Mic, Send, Plus, Play, Pause, Music, Zap, Settings2, ChevronDown, Info, MapPin, Check, ChevronRight, Lock, Plane } from 'lucide-react';
+import { Smile, Users, Heart, MessageSquare, User, Star, ArrowLeft, X, Bookmark, Image as ImageIcon, Phone, Video, MoreVertical, Mic, Send, Plus, Play, Pause, Music, Zap, Settings2, ChevronDown, Info, MapPin, Check, ChevronRight, Lock, Plane, Camera } from 'lucide-react';
 import * as LucideIcons from 'lucide-react';
 import { TAROT_DECK, TarotCard } from '../data/tarot';
+import { CupidChatBubble } from './CupidChatBubble';
+import { TarotInteractiveModal } from './TarotInteractiveModal';
+import { MomentsView } from './MomentsView';
+import { LunarAnimalsModal } from './LunarAnimalsModal';
+import { PremiumModal } from './PremiumModal';
+import { MusicClipModal } from './MusicClipModal';
+import { calculateFullCompatibility, getLunarAnimalFromDob, getWesternZodiacFromDob } from '../utils/compatibility';
 import { 
   genders, jobs, languages, religions, communicationStyles, intents, pets, 
   musics, books, foods, travels, games, sports 
 } from '../data';
 
 const SettingsIcon = LucideIcons.Settings;
-
-// Caching identical audio files to save memory
-const globalAudioCache: Record<string, string> = (window as any).globalAudioCache || {};
-(window as any).globalAudioCache = globalAudioCache;
 
 export function MainAppSelectField({ label, options, value, onChange }: { label: string, options: string[], value: string, onChange: (val: string) => void }) {
   const isCustomOption = value && !options.includes(value) && value !== 'Khác';
@@ -121,6 +125,7 @@ export const USER_PROFILE_DATA = {
     sport: 'Khác',
     songTitle: '',
     songUrl: '',
+    isPremium: false,
     bio: '',
     images: [] // Empty defaults so they setup their own app
 };
@@ -241,12 +246,13 @@ export const calculateZodiacCompatibility = (myZodiac: string) => {
 
 export const AppContext = React.createContext<{
   serverUsers: any[];
+  exploreUsers: any[];
   likedProfiles: any[];
   savedProfiles: any[];
   toggleLike: (profile: any, skipApiCall?: boolean) => void;
   toggleSave: (profile: any) => void;
   swipedRecords?: { target_user_id: number; action: string }[];
-  registerSwipe?: (targetUserId: number, action: 'like' | 'pass') => void;
+  registerSwipe?: (targetUserId: number, action: 'like' | 'pass' | 'viewed') => void;
   settings: {
     activePriorities: string[];
     distance: number;
@@ -272,8 +278,11 @@ export const AppContext = React.createContext<{
   updateSetupData: (data: any) => void;
   globalMatchModal: any;
   setGlobalMatchModal: (p: any) => void;
-  fetchMoreUsers: () => void;
+  fetchMoreUsers: (includeViewed?: boolean) => void;
+  replayProfiles: () => Promise<boolean>;
 }>({ 
+  serverUsers: [],
+  exploreUsers: [],
   likedProfiles: [], 
   savedProfiles: [], 
   toggleLike: () => {}, 
@@ -281,6 +290,7 @@ export const AppContext = React.createContext<{
   swipedRecords: [],
   registerSwipe: () => {},
   fetchMoreUsers: () => {},
+  replayProfiles: async () => false,
   isSavingPref: false,
   saveSettings: async () => false,
   settings: {
@@ -320,6 +330,7 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
       return [];
     }
   });
+  const pendingLikeIdsRef = React.useRef<Set<number>>(new Set());
   const [savedProfiles, setSavedProfiles] = useState<any[]>(() => {
     try {
       const d = localStorage.getItem('ais_saved');
@@ -333,6 +344,7 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
     }
   });
   const [serverUsers, setServerUsers] = useState<any[]>([]);
+  const [exploreUsers, setExploreUsers] = useState<any[]>([]);
   const [swipedRecords, setSwipedRecords] = useState<{ target_user_id: number; action: string }[]>(() => {
     try {
       const d = localStorage.getItem('ais_swipes');
@@ -344,7 +356,7 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
     return [];
   });
 
-  const registerSwipe = React.useCallback((targetUserId: number, action: 'like' | 'pass') => {
+  const registerSwipe = React.useCallback((targetUserId: number, action: 'like' | 'pass' | 'viewed') => {
     setSwipedRecords(prev => {
       const cleaned = prev.filter(r => r.target_user_id !== targetUserId);
       return [...cleaned, { target_user_id: targetUserId, action }];
@@ -352,11 +364,13 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
     const myId = sessionStorage.getItem('user_id');
     if (myId) {
       if (action === 'pass') {
-        fetch('/api/matches/swipe', {
+        apiFetch('/api/matches/swipe', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ user_id: parseInt(myId), target_user_id: targetUserId, action: 'PASS' })
         }).catch(() => {});
+      } else if (action === 'viewed') {
+        apiFetch(`/api/users/${targetUserId}/view`, { method: 'POST' }).catch(() => {});
       }
     }
   }, []);
@@ -390,11 +404,11 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
   const [lastLoadedUserId, setLastLoadedUserId] = React.useState<string | null>(null);
 
   const saveSettings = async (currentSettings: any) => {
-    const userId = sessionStorage.getItem('user_id') || localStorage.getItem('user_id') || (myProfile && myProfile.id ? myProfile.id.toString() : '999');
+    const userId = sessionStorage.getItem('user_id') || localStorage.getItem('user_id') || (myProfile?.id != null ? String(myProfile.id) : '999');
     if (!userId) return false;
     setIsSavingPref(true);
     try {
-      const res = await fetch(`/api/user_preferences/${userId}`, {
+      const res = await apiFetch(`/api/user_preferences/${userId}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ preferences: currentSettings })
@@ -416,7 +430,7 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
         setLastLoadedUserId(uId);
         
         // Fetch profile
-        fetch(`/api/users/profile/${uId}`)
+        apiFetch(`/api/users/profile/${uId}`)
           .then(r => r.json())
           .then(data => {
              if (data.success && data.data) {
@@ -427,7 +441,7 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
           .catch(() => {});
 
         // Fetch preferences
-        fetch(`/api/user_preferences/${uId}`)
+        apiFetch(`/api/user_preferences/${uId}`)
           .then(r => r.json())
           .then(data => {
             if (data.success && data.preferences) {
@@ -478,18 +492,20 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
     setMyProfile(prev => ({ ...prev, ...newProfileInfo }));
   };
 
-  const fetchMoreUsers = React.useCallback(() => {
-     fetch('/api/users/explore')
+  const fetchMoreUsers = React.useCallback((includeViewed = false) => {
+     apiFetch(`/api/users/explore${includeViewed ? '?forExplore=1' : ''}`)
        .then(r => r.json())
        .then(data => {
             if (data.success && data.data) {
                 const userList = data.data.map((u:any) => {
                    let profileData = u.profile_data || {};
-                   if (typeof profileData === 'string') {
-                       try { profileData = JSON.parse(profileData); } catch(e){}
-                   }
-                   let dob = profileData.dob;
-                  if (!dob && typeof profileData.age === 'number') {
+                    if (typeof profileData === 'string') {
+                        try { profileData = JSON.parse(profileData); } catch(e){}
+                    }
+                    let dob = profileData.dob;
+                   const hasBirthDate = Boolean(profileData.dob);
+                   const hasZodiac = Boolean(profileData.zodiac || profileData.dob);
+                   if (!dob && typeof profileData.age === 'number') {
                       const year = new Date().getFullYear() - profileData.age;
                       dob = `${year}-01-01`;
                   } else if (!dob) dob = '2000-01-01';
@@ -499,55 +515,71 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
                       if (profileData.name.includes('Đăng') || profileData.name.includes('Tuấn')) displayGender = 'Nam';
                   }
 
-                  return {
-                     id: u.id,
-                     email: u.email,
+                   return {
+                      id: u.id,
+                      isPremium: u.is_premium === true || Number(u.is_premium) === 1 || profileData.isPremium === true || Number(profileData.isPremium) === 1,
+                      createdAt: u.created_at,
+                      hasMoments: Boolean(profileData.hasMoments),
+                      hasBirthDate,
+                      hasZodiac,
+                      tarotInterest: Boolean(profileData.tarotInterest || profileData.tarot || (Array.isArray(profileData.interests) && profileData.interests.some((interest: string) => /tarot/i.test(interest)))),
+                     distanceKm: u.distance_km == null ? null : Number(u.distance_km),
                      lat: profileData.lat, lng: profileData.lng,
                      name: profileData.name || 'Người dùng mới',
                      gender: displayGender,
                      dob: dob,
-                     distance: (() => { let d = `Cách ${((u.id * 17) % 50) + 1} km`; if (myProfile?.lat && myProfile?.lng && profileData.lat && profileData.lng) { const R = 6371; const dLat = (profileData.lat - myProfile.lat) * Math.PI / 180; const dLon = (profileData.lng - myProfile.lng) * Math.PI / 180; const a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(myProfile.lat * Math.PI / 180) * Math.cos(profileData.lat * Math.PI / 180) * Math.sin(dLon/2) * Math.sin(dLon/2); const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a)); d = `Cách ${Math.max(1, Math.round(R * c))} km`; } return d; })(),
+                     distance: u.distance_km == null ? 'Chưa xác định vị trí' : `Cách ${u.distance_km} km`,
                      bio: profileData.bio || '',
-                     zodiac: profileData.zodiac || 'Bạch Dương',
+                      zodiac: profileData.zodiac || (hasBirthDate ? getWesternZodiacFromDob(profileData.dob) : 'Bạch Dương'),
                      location: profileData.hometown || profileData.location || 'Hà Nội',
-                     images: (() => {
-                        const hasCustom = profileData.images && profileData.images.length > 0 && !profileData.images[0].includes('photo-1549880338-65ddcdfd017b');
-                        return hasCustom ? profileData.images : getUniqueUnsplashPortraits(displayGender, u.id);
-                     })(),
+                     images: Array.isArray(profileData.images)
+                       ? [...new Set(profileData.images.map((image: any) => String(image || '').trim()).filter(Boolean))]
+                       : [],
                      job: profileData.job || 'Chưa cập nhật',
-                     need: profileData.need || profileData.intents || (profileData.interests && profileData.interests.length > 0 ? profileData.interests[0] : 'Trò chuyện vui vẻ'),
+                     need: profileData.need || profileData.intent || profileData.intents || '',
+                     interests: Array.isArray(profileData.interests) ? profileData.interests : [],
                      prompts: profileData.prompts || [],
                      lifestyle: profileData.lifestyle || {},
                      height: profileData.height || (['1m60', '1m62', '1m65', '1m68', '1m70', '1m72', '1m75', '1m78', '1m80', '1m82'][u.id % 10]),
                      language: profileData.language || 'Tiếng Việt',
                      religion: profileData.religion || 'Không',
-                     communicationStyle: profileData.communicationStyle || (['Nghiện nhắn tin', 'Thích gọi điện', 'Thích gọi video', 'Thích gặp mặt trực tiếp'][u.id % 4] || 'Thích gặp mặt trực tiếp'),
-                     pet: profileData.pet || profileData.lifestyle?.pet || (['Chó', 'Mèo', 'Yêu thích nhưng không nuôi', 'Không nuôi thú cưng'][u.id % 4]),
-                     music: profileData.music || profileData.lifestyle?.music || (['V-pop', 'K-pop', 'Nhạc điện tử', 'Taylor Swift', 'Sơn Tùng MTP'][u.id % 5]),
-                     book: profileData.book || profileData.lifestyle?.book || (['Tình cảm', 'Bí ẩn', 'Truyền cảm hứng', 'Tiểu thuyết trinh thám'][u.id % 4]),
-                     food: profileData.food || profileData.lifestyle?.food || (['Đồ ăn cay', 'Ăn chay', 'Đồ nướng', 'Cà phê', 'Phở'][u.id % 5]),
-                     travel: profileData.travel || profileData.lifestyle?.travel || (['Bãi biển', 'Đà Lạt', 'SaPa', 'Hội An', 'Thành phố'][u.id % 5]),
-                     game: profileData.game || profileData.lifestyle?.game || (['Genshin Impact', 'FiFa', 'Liên quân', 'Minecraft', 'Board games'][u.id % 5]),
-                     sport: profileData.sport || profileData.lifestyle?.sport || (['Pickleball', 'Bóng đá', 'Gym', 'Tennis'][u.id % 4]),
+                     communicationStyle: profileData.communicationStyle || '',
+                     pet: profileData.pet || profileData.lifestyle?.pet || '',
+                     music: profileData.music || profileData.lifestyle?.music || '',
+                     book: profileData.book || profileData.lifestyle?.book || '',
+                     food: profileData.food || profileData.lifestyle?.food || '',
+                     travel: profileData.travel || profileData.lifestyle?.travel || '',
+                     game: profileData.game || profileData.lifestyle?.game || '',
+                     sport: profileData.sport || profileData.lifestyle?.sport || '',
                       songTitle: profileData.songTitle,
                       songUrl: profileData.songUrl
                   };
                });
-               const myId = parseInt(sessionStorage.getItem('user_id') || '0');
-               setServerUsers(prev => {
-                  const existingIds = new Set(prev.map(p => p.id));
-                  const newUsers = userList.filter((u:any) => u.id !== myId && !existingIds.has(u.id));
-                  return [...prev, ...newUsers];
-               });
+               const myId = parseInt(sessionStorage.getItem('user_id') || localStorage.getItem('user_id') || '0');
+               const eligibleUsers = userList.filter((u:any) => Number(u.id) !== myId && u.images.length > 0);
+               if (includeViewed) setExploreUsers(eligibleUsers);
+               else setServerUsers(eligibleUsers);
            }
        }).catch(()=>{});
   }, [myProfile]);
+
+  const replayProfiles = React.useCallback(async () => {
+    try {
+      const response = await apiFetch('/api/users/replay', { method: 'POST' });
+      if (!response.ok) return false;
+      setSwipedRecords(previous => previous.filter(record => record.action === 'like'));
+      fetchMoreUsers();
+      return true;
+    } catch {
+      return false;
+    }
+  }, [fetchMoreUsers]);
 
   useEffect(() => {
      // Sync matches and historical swipes with backend database
      const userId = sessionStorage.getItem('user_id');
      if (userId) {
-         fetch(`/api/matches/${userId}`)
+         apiFetch(`/api/matches/${userId}`)
            .then(r => r.json())
            .then(data => {
                if (data.success && data.data) {
@@ -566,7 +598,7 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
                }
            }).catch(()=>{});
 
-         fetch(`/api/users/${userId}/swipes`)
+         apiFetch(`/api/users/${userId}/swipes`)
            .then(r => r.json())
            .then(data => {
                if (data.success && Array.isArray(data.data)) {
@@ -613,66 +645,54 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
                  updateMyProfile({ lat, lng });
                  const myId = sessionStorage.getItem('user_id');
                  if (myId) {
-                     fetch(`/api/users/profile/${myId}`, {
+                     apiFetch(`/api/users/profile/${myId}`, {
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ profileData: { ...myProfile, lat, lng } })
-                     }).catch(() => {});
+                     }).then(() => fetchMoreUsers()).catch(() => {});
                  }
-                 setServerUsers(prev => prev.map((u:any) => {
-                     let d = `Cách ${((u.id * 17) % 50) + 1} km`;
-                     if (u.lat && u.lng) {
-                         const R = 6371;
-                         const dLat = (u.lat - lat) * Math.PI / 180;
-                         const dLon = (u.lng - lng) * Math.PI / 180;
-                         const a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(lat * Math.PI / 180) * Math.cos(u.lat * Math.PI / 180) * Math.sin(dLon/2) * Math.sin(dLon/2);
-                         const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-                         d = `Cách ${Math.max(1, Math.round(R * c))} km`;
-                     }
-                     return { ...u, distance: d };
-                 }));
              }
          }, () => {}, { timeout: 10000 });
      }
-  }, []);
+  }, [fetchMoreUsers]);
 
   const updateSetupData = (data: any) => setSetupData((prev: any) => ({ ...prev, ...data }));
 
   const toggleLike = (profile: any, skipApiCall?: boolean) => {
-    if (!profile || !profile.id) return;
-    setLikedProfiles((prev) => {
-       const arr = Array.isArray(prev) ? prev : [];
-       const cleanArr = arr.filter(p => p && p.id);
-       const isLiked = cleanArr.some(p => p.id === profile.id);
-       if (!isLiked && !skipApiCall) {
-           // Send LIKE match to backend
-           const myId = sessionStorage.getItem('user_id');
-           if (myId) {
-               fetch('/api/matches/swipe', {
-                   method: 'POST',
-                   headers: { 'Content-Type': 'application/json' },
-                   body: JSON.stringify({ user_id: parseInt(myId), target_user_id: profile.id, action: 'LIKE' })
-               }).then(r => r.json()).then(data => {
-                   if (data.success && data.match_id) {
-                       setLikedProfiles(p => {
-                           const pArr = Array.isArray(p) ? p : [];
-                           return pArr.filter(Boolean).map(x => x.id === profile.id ? { ...x, match_id: data.match_id } : x);
-                       });
-                       setGlobalMatchModal(profile);
-                   }
-               }).catch(()=>{});
-           }
-           // Add to swipedRecords
-           setSwipedRecords(p => {
-              const cleaned = p.filter(r => r.target_user_id !== profile.id);
-              return [...cleaned, { target_user_id: profile.id, action: 'like' }];
-           });
-       } else if (isLiked) {
-           // Removed like, so they can see again, remove swipe
-           setSwipedRecords(p => p.filter(r => r.target_user_id !== profile.id));
-       }
-       return isLiked ? cleanArr.filter(p => p.id !== profile.id) : [...cleanArr, profile];
-    });
+    const targetId = Number(profile?.id);
+    if (!Number.isSafeInteger(targetId) || targetId <= 0) return;
+    const currentLikes = Array.isArray(likedProfiles) ? likedProfiles.filter(Boolean) : [];
+    if (currentLikes.some(item => Number(item.id) === targetId)) {
+      setLikedProfiles(previous => previous.filter(item => Number(item?.id) !== targetId));
+      setSwipedRecords(previous => previous.filter(record => Number(record.target_user_id) !== targetId));
+      return;
+    }
+
+    if (skipApiCall) {
+      setLikedProfiles(previous => previous.some(item => Number(item?.id) === targetId) ? previous : [...previous, profile]);
+      return;
+    }
+
+    const myId = sessionStorage.getItem('user_id') || localStorage.getItem('user_id');
+    if (!myId || pendingLikeIdsRef.current.has(targetId)) return;
+    pendingLikeIdsRef.current.add(targetId);
+    apiFetch('/api/matches/swipe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ user_id: Number(myId), target_user_id: targetId, action: 'LIKE' })
+    })
+      .then(async response => ({ response, data: await response.json().catch(() => ({})) }))
+      .then(({ response, data }) => {
+        if (!response.ok || !data.success) {
+          if (response.status === 429 && data.code === 'LIKE_DAILY_LIMIT') window.dispatchEvent(new Event('premium_required'));
+          return;
+        }
+        setLikedProfiles(previous => previous.some(item => Number(item?.id) === targetId) ? previous : [...previous, { ...profile, ...(data.match_id ? { match_id: data.match_id } : {}) }]);
+        setSwipedRecords(previous => [...previous.filter(record => Number(record.target_user_id) !== targetId), { target_user_id: targetId, action: 'like' }]);
+        if (data.match_id) setGlobalMatchModal(profile);
+      })
+      .catch(error => console.error('Could not save like:', error))
+      .finally(() => pendingLikeIdsRef.current.delete(targetId));
   };
 
   const toggleSave = (profile: any) => {
@@ -690,6 +710,7 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
     sessionStorage.clear();
     setMyProfile(USER_PROFILE_DATA);
     setServerUsers([]);
+    setExploreUsers([]);
     setLikedProfiles([]);
     setSavedProfiles([]);
     setSwipedRecords([]);
@@ -714,33 +735,42 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
   };
 
   return (
-    <AppContext.Provider value={{ serverUsers, likedProfiles, savedProfiles, toggleLike, toggleSave, swipedRecords, registerSwipe, settings, updateSettings, onNavigate, activeChatUser, setActiveChatUser, isTestFemaleView, toggleTestFemaleView: () => setIsTestFemaleView(v => !v), myProfile, updateMyProfile, setupData, updateSetupData, globalMatchModal, setGlobalMatchModal, fetchMoreUsers, saveSettings, isSavingPref, logout }}>
+    <AppContext.Provider value={{ serverUsers, exploreUsers, likedProfiles, savedProfiles, toggleLike, toggleSave, swipedRecords, registerSwipe, settings, updateSettings, onNavigate, activeChatUser, setActiveChatUser, isTestFemaleView, toggleTestFemaleView: () => setIsTestFemaleView(v => !v), myProfile, updateMyProfile, setupData, updateSetupData, globalMatchModal, setGlobalMatchModal, fetchMoreUsers, replayProfiles, saveSettings, isSavingPref, logout }}>
       {children}
     </AppContext.Provider>
   );
 }
 
 export function AppShell({ currentView, onNavigate, children }: AppShellProps) {
+  const { myProfile, updateMyProfile } = React.useContext(AppContext);
+  const [showPremiumGate, setShowPremiumGate] = useState(false);
+  useEffect(() => {
+    const showGate = () => setShowPremiumGate(true);
+    window.addEventListener('premium_required', showGate);
+    return () => window.removeEventListener('premium_required', showGate);
+  }, []);
   const navItems = [
-    { id: 'app_swipe', icon: <Smile className="w-8 h-8 stroke-[2]" />, label: 'Xem' },
-    { id: 'app_explore', icon: <Users className="w-8 h-8 stroke-[2]" />, label: 'Khám phá' },
-    { id: 'app_likes', icon: <Heart className="w-8 h-8 stroke-[2]" />, label: 'Lượt thích' },
-    { id: 'app_chat', icon: <MessageSquare className="w-8 h-8 stroke-[2]" />, label: 'Chat' },
-    { id: 'app_profile', icon: <User className="w-8 h-8 stroke-[2]" />, label: 'Hồ sơ' },
+    { id: 'app_swipe', icon: <Smile className="w-7 h-7 stroke-[2]" />, label: 'Xem' },
+    { id: 'app_explore', icon: <Users className="w-7 h-7 stroke-[2]" />, label: 'Khám phá' },
+    { id: 'app_likes', icon: <Heart className="w-7 h-7 stroke-[2]" />, label: 'Lượt thích' },
+    { id: 'app_chat', icon: <MessageSquare className="w-7 h-7 stroke-[2]" />, label: 'Chat' },
+    { id: 'app_profile', icon: <User className="w-7 h-7 stroke-[2]" />, label: 'Hồ sơ' },
   ] as const;
+  const visibleNavItems: any[] = [...navItems];
+  if ((myProfile as any)?.isAdmin) visibleNavItems.push({ id: 'app_admin', icon: <LucideIcons.ShieldCheck className="w-7 h-7 stroke-[2]" />, label: 'Quản trị' });
 
   return (
-    <div className="h-full w-full bg-[#fff0f1] font-sans flex flex-col items-center relative overflow-hidden">
-      <div className="w-full h-full flex flex-col bg-[#ff9ca0]">
+    <div className="h-full w-full bg-[#f0f9ff] font-sans flex flex-col items-center relative overflow-hidden">
+      <div className="w-full h-full flex flex-col bg-[#eaf4ff]">
         <div className="flex-1 overflow-y-hidden relative flex flex-col">
           <div className="absolute inset-0 overflow-y-auto">
              {children}
           </div>
         </div>
 
-      <div className="bg-[#ff9ca0] border-t border-black/10 z-50 shrink-0 pb-[env(safe-area-inset-bottom)]">
+      <div className="bg-[#eaf4ff] border-t border-black/10 z-50 shrink-0 pb-[env(safe-area-inset-bottom)]">
         <div className="flex justify-between items-center h-[72px] px-2 pb-1">
-          {navItems.map((item) => {
+          {visibleNavItems.map((item) => {
             const isActive = currentView === item.id;
             return (
               <button 
@@ -765,6 +795,16 @@ export function AppShell({ currentView, onNavigate, children }: AppShellProps) {
           </div>
         </div>
       </div>
+      <CupidChatBubble />
+      <PremiumModal
+        isOpen={showPremiumGate}
+        onClose={() => setShowPremiumGate(false)}
+        userName={myProfile?.name}
+        onPremiumActivated={() => {
+          updateMyProfile({ isPremium: true });
+          window.dispatchEvent(new Event('premium_activated'));
+        }}
+      />
     </div>
   );
 }
@@ -827,30 +867,11 @@ const MATCH_PROFILES: any[] = [
 
 
 export function filterProfiles(profiles: any[], settings: any, myGender: string = 'Nữ', isExplore: boolean = false) {
-  const { activePriorities = ['Dành Cho Bạn'], distance = 100, ageMin = 18, ageMax = 31, interestedIn = 'Mọi người', location = 'Hà Nội', isDistanceFlexible = true, isAgeFlexible = true } = settings;
-  const cleanSettingsLocation = location.split(',')[0].trim();
+  const { distance = 100, ageMin = 18, ageMax = 31, interestedIn = 'Mọi người', isAgeFlexible = true } = settings;
 
   return profiles.filter(profile => {
     
-    // Check if location matches. If it doesn't match perfectly, we simulate distance
-    const baseProfileLocation = profile.location || 'Hà Nội';
-    let profileDistance = 0;
-
-    if (cleanSettingsLocation === 'Gần bạn') {
-      profileDistance = parseInt(profile.distance.replace(/[^0-9]/g, '')) || 5;
-    } else if (baseProfileLocation === cleanSettingsLocation) {
-      // In same city, use the profile's base short distance
-      const distMatch = profile.distance.match(/\d+/);
-      if (distMatch) {
-        profileDistance = parseInt(distMatch[0], 10);
-      }
-    } else {
-      // In another city, distance is very large (e.g., 500km, 1000km, 1500km)
-      if (cleanSettingsLocation === 'TP. Hồ Chí Minh' && baseProfileLocation === 'Hà Nội') profileDistance = 1137;
-      else if (cleanSettingsLocation === 'Hà Nội' && baseProfileLocation === 'TP. Hồ Chí Minh') profileDistance = 1137;
-      else if (cleanSettingsLocation === 'Đà Nẵng' && baseProfileLocation === 'Hà Nội') profileDistance = 627;
-      else profileDistance = 1500;
-    }
+    const profileDistance = profile.distanceKm == null ? null : Number(profile.distanceKm);
     
     // Age matching 
     let profileAge = 0;
@@ -865,10 +886,7 @@ export function filterProfiles(profiles: any[], settings: any, myGender: string 
        profileGender = 'Nam';
     }
 
-    let distanceMatch = isExplore ? true : (profileDistance <= distance);
-    if (!isExplore && !distanceMatch && isDistanceFlexible) {
-       distanceMatch = true; // allow greater distance
-    }
+    const distanceMatch = isExplore || profileDistance == null || profileDistance <= distance;
 
     let ageMatch = isExplore ? true : (profileAge >= ageMin && profileAge <= ageMax);
     if (!isExplore && !ageMatch && isAgeFlexible) {
@@ -899,34 +917,13 @@ export function filterProfiles(profiles: any[], settings: any, myGender: string 
         }
     }
 
-    // For priorities like "Âm nhạc" hay "Chiêm tinh", check if they exist on the profile
-    let priorityMatch = true;
-    if (activePriorities.includes('Âm nhạc') && !profile.songTitle) {
-      priorityMatch = false;
-    }
-    if (activePriorities.includes('Chiêm tinh') && !profile.astrologyMatch) {
-      priorityMatch = false;
-    }
-
-    return distanceMatch && ageMatch && genderMatch && priorityMatch;
-  }).map(profile => {
-     // Augment the display distance dynamically based on the current location
-     const baseProfileLocation = profile.location || 'Hà Nội';
-     let displayDistance = profile.distance;
-     
-     if (cleanSettingsLocation === 'Gần bạn') {
-        // Assume all profiles are near if location is 'Gần bạn'
-        displayDistance = profile.distance;
-     } else if (baseProfileLocation !== cleanSettingsLocation) {
-        let km = 1500;
-        if (cleanSettingsLocation === 'TP. Hồ Chí Minh' && baseProfileLocation === 'Hà Nội') km = 1137;
-        else if (cleanSettingsLocation === 'Hà Nội' && baseProfileLocation === 'TP. Hồ Chí Minh') km = 1137;
-        else if (cleanSettingsLocation === 'Đà Nẵng' && baseProfileLocation === 'Hà Nội') km = 627;
-        displayDistance = `Cách ${km} km`;
-     }
-     
-     return { ...profile, currentDistanceDisplay: displayDistance };
-  });
+    return distanceMatch && ageMatch && genderMatch;
+  }).map(profile => ({
+     ...profile,
+     currentDistanceDisplay: profile.distanceKm == null
+       ? 'Chưa xác định vị trí'
+       : `Cách ${profile.distanceKm} km`
+  }));
 }
 
 const VIETNAM_LOCATIONS = [
@@ -1241,37 +1238,77 @@ function BioCard({ bio }: { bio: string; key?: string }) {
   );
 }
 
-export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profiles: any[], title: string, onClose?: () => void, onReachEnd?: () => void, key?: any }) {
-  const { likedProfiles, savedProfiles, toggleLike, toggleSave, settings, updateSettings, myProfile, updateMyProfile, saveSettings, isSavingPref, registerSwipe } = React.useContext(AppContext);
+export function ProfileSwiper({ profiles, title, onClose, onReachEnd, canReplay = false, onReplay, storageKey, readOnly = false }: { profiles: any[], title: string, onClose?: () => void, onReachEnd?: () => void, canReplay?: boolean, onReplay?: () => Promise<boolean> | boolean | void, storageKey?: string, readOnly?: boolean, key?: any }) {
+  const { likedProfiles, toggleLike, settings, updateSettings, myProfile, updateMyProfile, saveSettings, isSavingPref, registerSwipe, setActiveChatUser, onNavigate } = React.useContext(AppContext);
+  const normalizePriorityList = (priorities: any) => {
+    const aliases: Record<string, string> = { 'Chiêm tinh': 'Cung hoàng đạo', '12 Con Giáp': 'Tử vi', '12 con giáp': 'Tử vi', 'Tarot': 'Trải bài Tarot', 'Trải bài tarot': 'Trải bài Tarot' };
+    const normalized = (Array.isArray(priorities) ? priorities : ['Dành Cho Bạn']).map((priority: string) => aliases[priority] || priority);
+    return [...new Set(normalized)];
+  };
+  const sessionProfileKey = storageKey || `swipe_id_${title}`;
   const [showSaveSuccess, setShowSaveSuccess] = useState(false);
+  const [isReplaying, setIsReplaying] = useState(false);
+  const [replayError, setReplayError] = useState(false);
+  const [friendRequestSent, setFriendRequestSent] = useState(false);
+  const [isSendingFriendRequest, setIsSendingFriendRequest] = useState(false);
   const [currentIndex, setCurrentIndex] = useState(() => {
-     const storedId = sessionStorage.getItem(`swipe_id_${title}`);
+     const storedId = sessionStorage.getItem(sessionProfileKey);
      if (storedId) {
-         const foundIdx = profiles.findIndex(p => p.id === parseInt(storedId) || p.id === storedId);
+         const foundIdx = profiles.findIndex(p => p.type !== 'advertisement' && (p.id === parseInt(storedId) || p.id === storedId));
          if (foundIdx !== -1) return foundIdx;
      }
      return 0;
   });
+  const profileListRef = React.useRef(profiles);
+  const activeProfileIdRef = React.useRef<any>(profiles[currentIndex]?.id ?? null);
+  const skipRegisterForListRef = React.useRef<any>(null);
 
   const rawProfile = profiles[currentIndex] || null;
 
   useEffect(() => {
-     if (rawProfile) {
-         sessionStorage.setItem(`swipe_id_${title}`, rawProfile.id.toString());
+     if (profileListRef.current === profiles) return;
+     const activeId = activeProfileIdRef.current ?? sessionStorage.getItem(sessionProfileKey);
+     const restoredIndex = activeId == null ? -1 : profiles.findIndex(profile => String(profile.id) === String(activeId));
+     profileListRef.current = profiles;
+     skipRegisterForListRef.current = profiles;
+     const fallbackIndex = activeId == null ? 0 : Math.min(currentIndex, Math.max(0, profiles.length - 1));
+     setCurrentIndex(restoredIndex >= 0 ? restoredIndex : fallbackIndex);
+      if (!readOnly && restoredIndex < 0 && profiles[fallbackIndex]?.id != null && profiles[fallbackIndex].type !== 'advertisement') {
+        registerSwipe?.(Number(profiles[fallbackIndex].id), 'viewed');
      }
-  }, [currentIndex, rawProfile, title]);
+     setCurrentImageIndex(0);
+     setIsPlaying(false);
+   }, [profiles, sessionProfileKey, currentIndex, registerSwipe, readOnly]);
+
+  useEffect(() => {
+    if (skipRegisterForListRef.current === profiles) {
+      skipRegisterForListRef.current = null;
+      return;
+    }
+     if (!readOnly && rawProfile?.id != null && rawProfile.type !== 'advertisement' && registerSwipe) {
+       registerSwipe(Number(rawProfile.id), 'viewed');
+     }
+   }, [rawProfile?.id, rawProfile?.type, registerSwipe, readOnly]);
+
+  useEffect(() => {
+     if (rawProfile?.id != null) activeProfileIdRef.current = rawProfile.id;
+      if (!readOnly && rawProfile && rawProfile.id != null && rawProfile.type !== 'advertisement') {
+          sessionStorage.setItem(sessionProfileKey, String(rawProfile.id));
+      }
+   }, [currentIndex, rawProfile, sessionProfileKey, readOnly]);
 
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
   const [isAstrologyModalOpen, setIsAstrologyModalOpen] = useState(false);
   const [showFullReading, setShowFullReading] = useState(false);
   const [astrologyCardIndex, setAstrologyCardIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [isUploadingMusic, setIsUploadingMusic] = useState(false);
-  const [topActionModal, setTopActionModal] = useState<null | 'music' | 'astrology' | 'settings' | 'tarot'>(null);
+  const [topActionModal, setTopActionModal] = useState<null | 'music' | 'astrology' | 'zodiacCompatibility' | 'settings' | 'tarot' | 'lunar' | 'moments' | 'premium'>(null);
+  const [hasPremiumAccess, setHasPremiumAccess] = useState(Boolean(myProfile?.isPremium));
+  const [compatibilityZodiac, setCompatibilityZodiac] = useState(myProfile?.zodiac || ZODIAC_LIST[0]);
+  const [partnerCompatibilityZodiac, setPartnerCompatibilityZodiac] = useState(ZODIAC_LIST[6]);
   const [isLocationModalOpen, setIsLocationModalOpen] = useState(false);
   const [isAddLocationModalOpen, setIsAddLocationModalOpen] = useState(false);
   const [currentTarotIndex, setCurrentTarotIndex] = useState(0);
-  const musicInputRef = React.useRef<HTMLInputElement>(null);
   const audioRef = React.useRef<HTMLAudioElement>(null);
 
   const { activePriorities, distance, isDistanceFlexible, ageMin, ageMax, isAgeFlexible, interestedIn } = settings;
@@ -1284,7 +1321,7 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
   };
 
   const [localSettings, setLocalSettings] = useState(() => ({
-     activePriorities: settings.activePriorities || ['Dành Cho Bạn'],
+     activePriorities: normalizePriorityList(settings.activePriorities),
      distance: settings.distance ?? 100,
      isDistanceFlexible: settings.isDistanceFlexible ?? true,
      ageMin: settings.ageMin ?? 18,
@@ -1297,7 +1334,7 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
   useEffect(() => {
      if (topActionModal === 'settings') {
         setLocalSettings({
-           activePriorities: settings.activePriorities || ['Dành Cho Bạn'],
+           activePriorities: normalizePriorityList(settings.activePriorities),
            distance: settings.distance ?? 100,
            isDistanceFlexible: settings.isDistanceFlexible ?? true,
            ageMin: settings.ageMin ?? 18,
@@ -1308,6 +1345,24 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
         });
      }
   }, [topActionModal, settings]);
+
+  useEffect(() => {
+    if (myProfile?.zodiac && ZODIAC_LIST.includes(myProfile.zodiac)) setCompatibilityZodiac(myProfile.zodiac);
+  }, [myProfile?.zodiac]);
+
+  useEffect(() => {
+    let active = true;
+    const activatePremium = () => setHasPremiumAccess(true);
+    window.addEventListener('premium_activated', activatePremium);
+    apiFetch('/api/advertisements/feed')
+      .then(response => response.json())
+      .then(data => { if (active && data.success) setHasPremiumAccess(Boolean(data.isPremium)); })
+      .catch(() => { if (active) setHasPremiumAccess(Boolean(myProfile?.isPremium)); });
+    return () => {
+      active = false;
+      window.removeEventListener('premium_activated', activatePremium);
+    };
+  }, [myProfile?.isPremium]);
 
   const updateLocalSettings = (partial: any) => {
      setLocalSettings(prev => ({ ...prev, ...partial }));
@@ -1330,6 +1385,7 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
   };
 
   const currentProfile = React.useMemo(() => {
+    if (rawProfile?.type === 'advertisement') return rawProfile;
     if (rawProfile && !rawProfile.astrologyDetails) {
        rawProfile.astrologyDetails = {
            vibe: Math.floor(Math.random() * 3) + 3,
@@ -1390,30 +1446,31 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
     };
   }, [rawProfile, myProfile]);
 
+  useEffect(() => { setFriendRequestSent(false); }, [currentProfile?.id]);
+
   const [currentProfileAudioUrl, setCurrentProfileAudioUrl] = useState<string | null>(null);
 
   useEffect(() => {
+     let active = true;
+     setCurrentProfileAudioUrl(null);
+     setIsPlaying(false);
      if (currentProfile?.songTitle) {
          if (currentProfile.songUrl) {
             setCurrentProfileAudioUrl(currentProfile.songUrl);
          } else {
-            fetch(`/api/users/${currentProfile.id}/song`)
+            apiFetch(`/api/users/${currentProfile.id}/song`)
               .then(res => res.json())
               .then(data => {
-                  if (data.success && data.data && data.data.song_data) {
+                  if (active && data.success && data.data && data.data.song_data) {
                       setCurrentProfileAudioUrl(data.data.song_data);
-                  } else {
-                      // Fallback to a high quality free romantic lofi track so playback never breaks
-                      setCurrentProfileAudioUrl('https://files.freemusicarchive.org/storage-freemusicarchive-org/music/no_curator/Tours/Enthusiast/Tours_-_01_-_Enthusiast.mp3');
                   }
-              }).catch(() => {
-                  setCurrentProfileAudioUrl('https://files.freemusicarchive.org/storage-freemusicarchive-org/music/no_curator/Tours/Enthusiast/Tours_-_01_-_Enthusiast.mp3');
-              });
+              }).catch(() => {});
          }
      } else {
          setCurrentProfileAudioUrl(null);
      }
-  }, [currentProfile]);
+     return () => { active = false; };
+  }, [currentProfile?.id, currentProfile?.songTitle, currentProfile?.songUrl]);
 
   const calculateAge = (dob: string) => {
     if (!dob) return '';
@@ -1424,6 +1481,7 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
 
   const handleBack = () => {
     if (currentIndex > 0) {
+      activeProfileIdRef.current = profiles[currentIndex - 1]?.id ?? null;
       setCurrentIndex(currentIndex - 1);
       setCurrentImageIndex(0);
       setIsAstrologyModalOpen(false);
@@ -1466,13 +1524,17 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
 
   const handleNext = () => {
     if (currentIndex < profiles.length - 1) {
+      activeProfileIdRef.current = profiles[currentIndex + 1]?.id ?? null;
       setCurrentIndex(currentIndex + 1);
     } else {
       if (onReachEnd) {
-         setCurrentIndex(0); // reset index for new batch
+         activeProfileIdRef.current = null;
+         sessionStorage.removeItem(sessionProfileKey);
+         setCurrentIndex(profiles.length);
          onReachEnd();
       } else {
-         setCurrentIndex(0); // loop for prototype
+         activeProfileIdRef.current = null;
+         setCurrentIndex(profiles.length); // stop at the end instead of showing the same profiles again
       }
     }
     setCurrentImageIndex(0);
@@ -1481,8 +1543,36 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
     x.set(0);
   };
 
+  const replayAndReset = async () => {
+    if (isReplaying) return;
+    setIsReplaying(true);
+    setReplayError(false);
+    try {
+      const replayed = await onReplay?.();
+      if (replayed === false) {
+        setReplayError(true);
+        return;
+      }
+      activeProfileIdRef.current = null;
+      sessionStorage.removeItem(sessionProfileKey);
+      setCurrentIndex(0);
+    } catch {
+      setReplayError(true);
+    } finally {
+      setIsReplaying(false);
+    }
+  };
+
   const isLiked = currentProfile ? (likedProfiles || []).some(p => p && p.id === currentProfile.id) : false;
-  const isSaved = currentProfile ? (savedProfiles || []).some(p => p && p.id === currentProfile.id) : false;
+  const adTargetUrl = currentProfile?.type === 'advertisement' ? (() => {
+    try {
+      const parsed = new URL(currentProfile.target_url);
+      return parsed.protocol === 'https:' || parsed.protocol === 'http:' ? parsed.href : null;
+    } catch {
+      return null;
+    }
+  })() : null;
+  const zodiacCompatibilityScore = calculateZodiacCompatibility(compatibilityZodiac)[partnerCompatibilityZodiac] || 50;
 
   const onLikeClick = () => {
     if (currentProfile) {
@@ -1494,8 +1584,60 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
     }
   };
 
-  const onSaveClick = () => {
-    if (currentProfile) toggleSave(currentProfile);
+  const onAddFriendClick = async () => {
+    if (!currentProfile || isSendingFriendRequest) return;
+    setIsSendingFriendRequest(true);
+    try {
+      const response = await apiFetch('/api/friend-requests', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_user_id: Number(currentProfile.id) })
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Không gửi được lời mời kết bạn.');
+      setFriendRequestSent(true);
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'Không gửi được lời mời kết bạn.');
+    } finally {
+      setIsSendingFriendRequest(false);
+    }
+  };
+
+  const openCupidTool = (tool: 'tarot' | 'zodiac' | 'lunar') => {
+    if (!hasPremiumAccess && (tool === 'tarot' || tool === 'lunar')) {
+      setTopActionModal('premium');
+      return;
+    }
+    setTopActionModal(null);
+    window.dispatchEvent(new CustomEvent('cupid_open_tool', { detail: { tool } }));
+  };
+
+  const startMomentChat = async (moment: { userId: number; userName: string; userAvatar: string; imageUrl: string }) => {
+    const userId = Number(sessionStorage.getItem('user_id') || localStorage.getItem('user_id'));
+    if (!userId) return;
+    try {
+      const matchesResponse = await apiFetch(`/api/matches/${userId}`);
+      const matchesResult = await matchesResponse.json();
+      const match = (matchesResult.data || []).find((item: any) => Number(item.user_id) === Number(moment.userId));
+      if (!matchesResponse.ok || !match) {
+        window.alert('Bạn cần kết bạn với người này trước khi bắt đầu trò chuyện.');
+        return;
+      }
+      const profileData = typeof match.profile_data === 'string' ? JSON.parse(match.profile_data) : (match.profile_data || {});
+      const messageResponse = await apiFetch('/api/messages', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ match_id: match.match_id, sender_id: userId, text: moment.imageUrl })
+      });
+      if (!messageResponse.ok) throw new Error('Không gửi được ảnh khoảnh khắc vào cuộc trò chuyện.');
+      setActiveChatUser({
+        id: Number(match.user_id), userId: Number(match.user_id), matchId: Number(match.match_id),
+        name: profileData.name || moment.userName, img: profileData.images?.[0] || moment.userAvatar,
+      });
+      onNavigate?.('app_chat');
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'Không mở được cuộc trò chuyện.');
+    }
   };
 
   const handleDragEnd = (event: any, info: any) => {
@@ -1513,9 +1655,9 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
   };
 
   return (
-    <div className="h-full w-full flex flex-col bg-[#ff9ca0]">
+    <div className="h-full w-full flex flex-col bg-[#eaf4ff]">
       {/* Top Banner */}
-      <div className="bg-[#ff9ca0] px-4 justify-between flex items-center pt-8 pb-3 z-20 shrink-0 shadow-sm border-b border-black/10 relative">
+      <div className="bg-[#eaf4ff] px-4 justify-between flex items-center pt-8 pb-3 z-20 shrink-0 shadow-sm border-b border-black/10 relative">
         {onClose ? (
            <>
              <button onClick={onClose} className="p-1.5 active:scale-90 transition-transform">
@@ -1534,34 +1676,83 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
                 <Settings2 className="w-6 h-6 stroke-[2]" />
              </button>
              <div className="flex-1 min-w-0 overflow-x-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] mx-2">
-                <div className="flex bg-black/10 rounded-full p-1 w-max gap-1">
-                   <button className="bg-white rounded-full px-4 py-1.5 text-[14px] font-bold shadow-sm border border-black/5 flex items-center shrink-0">
+                <div className="flex bg-black/15 rounded-full p-1 w-max gap-1">
+                   <button className="bg-white rounded-full px-4 py-1.5 text-[14px] font-bold shadow-sm border border-black/5 flex items-center shrink-0 text-black">
                      Dành Cho Bạn
                    </button>
-                   <button onClick={() => setTopActionModal('music')} className="rounded-full px-4 py-1.5 text-[14px] font-bold text-black/60 shrink-0 hover:bg-black/5 transition-colors">
-                     Âm nhạc
+                   <button onClick={() => setTopActionModal('moments')} className="rounded-full px-4 py-1.5 text-[14px] font-bold text-white flex items-center gap-1.5 shrink-0 bg-white/20 hover:bg-white/30 transition-colors">
+                     <Camera className="w-4 h-4" />
+                     <span>Khoảnh khắc</span>
                    </button>
-                   <button onClick={() => setTopActionModal('astrology')} className="rounded-full px-4 py-1.5 text-[14px] font-bold text-black/60 flex items-center gap-1 shrink-0 hover:bg-black/5 transition-colors">
+                   <button onClick={() => setTopActionModal(hasPremiumAccess ? 'music' : 'premium')} className="rounded-full px-4 py-1.5 text-[14px] font-bold text-white flex items-center gap-1.5 shrink-0 bg-cyan-500/40 hover:bg-cyan-500/60 transition-colors">
+                     <Music className="w-4 h-4" />
+                     <span>Âm nhạc</span>
+                     {!hasPremiumAccess && <Lock className="h-3 w-3" />}
+                   </button>
+                   <button onClick={() => setTopActionModal('astrology')} className="rounded-full px-4 py-1.5 text-[14px] font-bold text-white flex items-center gap-1 shrink-0 bg-sky-500/45 hover:bg-sky-500/65 transition-colors">
+                     <span>Cung hoàng đạo</span>
+                   </button>
+                   <button onClick={() => setTopActionModal('lunar')} className="rounded-full px-4 py-1.5 text-[14px] font-bold text-white flex items-center gap-1 shrink-0 bg-amber-500/45 hover:bg-amber-500/65 transition-colors">
+                     <span>12 con giáp</span>
+                   </button>
+                   <button onClick={() => openCupidTool('tarot')} className="rounded-full px-4 py-1.5 text-[14px] font-bold text-white/90 flex items-center gap-1 shrink-0 bg-violet-500/40 hover:bg-violet-500/60 transition-colors">
+                     <span>Trải bài Tarot</span>
+                     {!hasPremiumAccess && <Lock className="h-3 w-3" />}
+                   </button>
+                   <button onClick={() => setTopActionModal('zodiacCompatibility')} className="rounded-full px-4 py-1.5 text-[14px] font-bold text-white/90 flex items-center gap-1 shrink-0 bg-indigo-500/40 hover:bg-indigo-500/60 transition-colors">
                      <span>Chiêm tinh</span>
                    </button>
-                   <button onClick={() => setTopActionModal('tarot')} className="rounded-full px-4 py-1.5 text-[14px] font-bold text-[#ff2d55] flex items-center gap-1 shrink-0 bg-pink-100/50 hover:bg-pink-100/80 transition-colors">
-                     <span>Tarot tình yêu</span>
+                   <button onClick={() => openCupidTool('lunar')} className="rounded-full px-4 py-1.5 text-[14px] font-bold text-white/90 flex items-center gap-1 shrink-0 bg-amber-500/40 hover:bg-amber-500/60 transition-colors">
+                     <span>Tử vi</span>
+                     {!hasPremiumAccess && <Lock className="h-3 w-3" />}
                    </button>
                 </div>
              </div>
-             <button className="bg-purple-600/20 p-2 rounded-full shrink-0">
-                <Zap className="w-5 h-5 text-purple-600 fill-purple-600" />
+             <button 
+               onClick={() => setTopActionModal('premium')}
+               className="bg-amber-400/25 hover:bg-amber-400/35 p-2 rounded-full shrink-0 border border-amber-300/40 active:scale-95 transition-transform"
+               title="Gói Premium DSS Nâng Cao"
+             >
+                <Zap className="w-5 h-5 text-amber-300 fill-amber-300" />
              </button>
           </div>
         )}
       </div>
 
       {/* Card area */}
-      <div className="flex-1 relative bg-[#fff0f1] overflow-hidden">
+      <div className="flex-1 relative bg-[#f0f9ff] overflow-hidden">
         {profiles.length === 0 ? (
-          <div className="absolute inset-0 flex justify-center items-center">
-            <p className="text-xl font-bold text-black/30">Không có hồ sơ nào</p>
+          <div className="absolute inset-0 flex flex-col justify-center items-center gap-5 px-8 text-center">
+            <p className="text-lg font-bold text-slate-700">Đã hết hồ sơ trong khu vực của bạn, bạn hãy tăng thêm khoảng cách tối đa để xem thêm hồ sơ</p>
+            {onClose ? (
+              <button onClick={onClose} className="rounded-full bg-sky-600 px-5 py-3 font-bold text-white shadow-lg active:scale-95">Quay lại khám phá</button>
+            ) : (
+              <button onClick={() => setTopActionModal('settings')} className="rounded-full bg-sky-600 px-5 py-3 font-bold text-white shadow-lg active:scale-95">Điều chỉnh khoảng cách</button>
+            )}
+            {canReplay && <>
+              <button disabled={isReplaying} onClick={() => { void replayAndReset(); }} className="rounded-full bg-gradient-to-r from-indigo-500 to-sky-500 px-6 py-3 font-extrabold text-white shadow-lg active:scale-95 disabled:opacity-60">{isReplaying ? 'Đang tải hồ sơ…' : 'Xem lại hồ sơ'}</button>
+              {replayError && <p className="text-sm font-semibold text-rose-600">Chưa thể tải lại hồ sơ. Vui lòng thử lại.</p>}
+            </>}
           </div>
+        ) : currentProfile?.type === 'advertisement' ? (
+          <motion.div key={currentProfile.id} initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center bg-white">
+            <span className="mb-3 rounded-full bg-amber-100 px-3 py-1 text-xs font-black uppercase tracking-wide text-amber-800">Quảng cáo</span>
+            <div className="w-full max-w-sm overflow-hidden rounded-3xl border border-slate-200 bg-white shadow-xl">
+              <img src={currentProfile.image_url} alt={currentProfile.title || 'Sản phẩm quảng cáo'} className="h-72 w-full object-cover" />
+              <div className="p-5 text-left">
+                <h2 className="text-xl font-extrabold text-slate-900">{currentProfile.title}</h2>
+                {currentProfile.description && <p className="mt-2 text-sm leading-relaxed text-slate-600">{currentProfile.description}</p>}
+                {adTargetUrl ? (
+                  <a href={adTargetUrl} target="_blank" rel="noopener noreferrer" className="mt-5 flex w-full items-center justify-center rounded-xl bg-amber-400 px-4 py-3 font-extrabold text-slate-950 shadow-md hover:bg-amber-300">
+                    Tìm hiểu thêm <LucideIcons.ExternalLink className="ml-2 h-4 w-4" />
+                  </a>
+                ) : (
+                  <p className="mt-4 text-sm font-semibold text-red-600">Liên kết quảng cáo không hợp lệ.</p>
+                )}
+              </div>
+            </div>
+            <button onClick={handleNext} className="mt-5 rounded-full bg-sky-700 px-6 py-3 font-bold text-white shadow active:scale-95">Tiếp tục xem hồ sơ</button>
+          </motion.div>
         ) : (
           <AnimatePresence mode="popLayout">
             {currentProfile ? (
@@ -1574,7 +1765,7 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
                 className="absolute inset-0 flex flex-col w-full h-full"
               >
               <motion.div 
-                drag="x"
+                drag={readOnly ? false : 'x'}
                 dragConstraints={{ left: 0, right: 0 }}
                 dragSnapToOrigin={true}
                 style={{ x, rotate }}
@@ -1607,6 +1798,7 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
                        <span className="text-[26px] font-normal">{currentAge}</span>
                     </h2>
                     <p className="text-[16px] font-medium text-white/90 drop-shadow-md mt-1 mb-4">{currentProfile.currentDistanceDisplay || currentProfile.distance}</p>
+                    <span className="mb-2 self-start rounded-full bg-sky-600/90 px-3 py-1 text-xs font-extrabold text-white shadow">{currentProfile.compatibilityScore}% tương thích</span>
                     
                     <div className="relative pointer-events-auto">
   <AnimatePresence mode="wait">
@@ -1682,7 +1874,28 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
          }
 
          const isMusicPriority = settings?.activePriorities?.includes('Âm nhạc');
-         const isAstrologyPriority = settings?.activePriorities?.includes('Chiêm tinh');
+         const isAstrologyPriority = settings?.activePriorities?.includes('Cung hoàng đạo');
+
+         if (hasMusic && (isMusicPriority || currentImageIndex === targetMusicIndex)) {
+            renderElements.push(
+              <button
+                key="profile_music"
+                type="button"
+                disabled={!currentProfileAudioUrl}
+                onClick={(event) => { event.stopPropagation(); setIsPlaying(value => !value); }}
+                className="flex w-full items-center gap-3 rounded-2xl border border-sky-200/60 bg-slate-950/70 px-4 py-3 text-left text-white shadow-lg backdrop-blur-md transition hover:bg-slate-900 disabled:opacity-70"
+              >
+                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-cyan-300 to-sky-600 text-slate-950">
+                  {isPlaying ? <LucideIcons.Pause className="h-5 w-5 fill-current" /> : <LucideIcons.Play className="h-5 w-5 fill-current" />}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="block text-[10px] font-extrabold uppercase tracking-wider text-sky-200">Âm nhạc yêu thích</span>
+                  <span className="block truncate text-sm font-bold">{currentProfile.songTitle}</span>
+                </span>
+                <LucideIcons.AudioLines className="h-5 w-5 shrink-0 text-sky-200" />
+              </button>
+            );
+         }
 
          // BioCard (Giới thiệu bản thân) ONLY if currentProfile has a bio, on currentImageIndex === 0
          if (currentImageIndex === 0 && currentProfile.bio && currentProfile.bio.trim() !== '' && !isMusicPriority && !isAstrologyPriority) {
@@ -1716,13 +1929,13 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
             }
          }
          
-         // 2. Render Astrology ("Chiêm tinh") card
+         // 2. Render Astrology ("Cung hoàng đạo") card
          const shouldShowAstro = isAstrologyPriority || (currentImageIndex === targetAstrologyIndex && !isMusicPriority);
          if (shouldShowAstro) {
             renderElements.push(
               <div key="astro" className="bg-black/50 backdrop-blur-md px-4 py-3.5 rounded-xl border border-white/20 shadow-sm text-[14px] text-white cursor-pointer transition-all w-full" onClick={(e) => { e.stopPropagation(); setIsAstrologyModalOpen(true); }}>
                  <div className="line-clamp-2">
-                   <span className="font-bold text-[#ffd700]">Chiêm tinh: </span>
+                   <span className="font-bold text-[#ffd700]">Cung hoàng đạo: </span>
                    <span className="text-white/90">{currentProfile.astrologyMatch}</span>
                  </div>
                  <div className="text-[#ffd700] mt-1 font-bold text-[13px] hover:underline">Xem thêm {'>'}</div>
@@ -1767,41 +1980,6 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
             }
          }
 
-         // 4. Render Music player
-         const shouldShowMusic = (hasMusic && isMusicPriority) || (hasMusic && currentImageIndex === targetMusicIndex && !isAstrologyPriority);
-         if (shouldShowMusic) {
-            const isAudioLoading = !currentProfileAudioUrl;
-            renderElements.push(
-              <div key="music" className="bg-black/50 backdrop-blur-md p-3.5 rounded-xl border border-white/20 shadow-sm flex items-center justify-between mt-1 text-white w-full cursor-pointer hover:bg-black/60 transition-all active:scale-[0.98]" onClick={(e) => {
-                 e.stopPropagation();
-                 if (isAudioLoading) return;
-                 setIsPlaying(!isPlaying);
-              }}>
-                 <div className="flex items-center gap-3 min-w-0 flex-1">
-                    <div className="w-9 h-9 rounded-full bg-pink-500 flex items-center justify-center shrink-0">
-                       {isAudioLoading ? (
-                          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                       ) : isPlaying ? (
-                          <Pause className="w-[18px] h-[18px] fill-white text-white" />
-                       ) : (
-                          <Play className="w-[18px] h-[18px] fill-white text-white translate-x-[1px]" />
-                       )}
-                    </div>
-                    <div className="flex flex-col min-w-0 flex-1">
-                       <span className="text-[14px] font-bold text-white truncate w-full block">
-                          {isAudioLoading ? "Đang tải bài hát..." : currentProfile.songTitle}
-                       </span>
-                       <span className="text-[11px] text-white/70 truncate block">Tải lên bởi {currentProfile.name}</span>
-                    </div>
-                 </div>
-                 <div className="flex gap-1 ml-3 justify-center items-center shrink-0">
-                    <span className={`w-1 h-3.5 bg-white/50 rounded-full ` + (isPlaying && !isAudioLoading ? 'animate-[bounce_0.8s_infinite]' : '')}></span>
-                    <span className={`w-1 h-4.5 bg-white/70 rounded-full ` + (isPlaying && !isAudioLoading ? 'animate-[bounce_1s_infinite]' : '')}></span>
-                    <span className={`w-1 h-2.5 bg-white/40 rounded-full ` + (isPlaying && !isAudioLoading ? 'animate-[bounce_0.6s_infinite]' : '')}></span>
-                 </div>
-              </div>
-            );
-         }
 
          // 5. Render Hobby/Interest Tags at appropriate index (distributed to give space)
          const tagsToShow = currentProfile.matchingTags || [];
@@ -1843,13 +2021,13 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
       })()}
     </motion.div>
   </AnimatePresence>
-  <audio ref={audioRef} src={currentProfileAudioUrl || ''} onEnded={() => setIsPlaying(false)} className="hidden" />
+  <audio ref={audioRef} src={currentProfileAudioUrl || undefined} onEnded={() => setIsPlaying(false)} className="hidden" />
 </div>
                   </div>
                 </div>
 
                 {/* Action Buttons Fixed at Bottom of Profile Card Area */}
-                <div className="absolute bottom-6 left-0 right-0 flex justify-center items-center gap-4 z-40 w-full pointer-events-auto">
+                {!readOnly && <div className="absolute bottom-6 left-0 right-0 flex justify-center items-center gap-4 z-40 w-full pointer-events-auto">
                    <motion.button whileTap={{ scale: 0.85 }} onClick={handleBack} className="w-[60px] h-[60px] bg-white rounded-full flex justify-center items-center shrink-0 shadow-xl border border-black/5">
                      <ArrowLeft className="w-7 h-7 text-[#2dd881] stroke-[2.5]" />
                    </motion.button>
@@ -1864,10 +2042,11 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
                    <motion.button whileTap={{ scale: 0.85 }} onClick={onLikeClick} className="w-[72px] h-[72px] bg-white rounded-full flex justify-center items-center shrink-0 shadow-xl border border-black/5">
                      <Heart className={`w-8 h-8 flex-shrink-0 stroke-[2] ${isLiked ? 'text-[#ff4081] fill-[#ff4081]' : 'text-[#ff4081]'}`} />
                    </motion.button>
-                   <motion.button whileTap={{ scale: 0.85 }} onClick={onSaveClick} className="w-[60px] h-[60px] bg-white rounded-full flex justify-center items-center shrink-0 shadow-xl border border-black/5">
-                     <Bookmark className={`w-7 h-7 stroke-[2] ${isSaved ? 'text-yellow-500 fill-yellow-500' : 'text-yellow-500'}`} />
+                   <motion.button whileTap={{ scale: 0.85 }} onClick={onAddFriendClick} disabled={isSendingFriendRequest || friendRequestSent} title="Thêm bạn" className="w-[76px] h-[60px] bg-white rounded-full flex flex-col justify-center items-center gap-0.5 shrink-0 shadow-xl border border-sky-200 disabled:opacity-80">
+                     <LucideIcons.UserPlus className={`w-6 h-6 stroke-[2.5] ${friendRequestSent ? 'text-emerald-600' : 'text-sky-600'}`} />
+                     <span className={`text-[9px] leading-none font-extrabold ${friendRequestSent ? 'text-emerald-700' : 'text-sky-700'}`}>{friendRequestSent ? 'Đã gửi' : isSendingFriendRequest ? 'Đang gửi' : ''}</span>
                    </motion.button>
-                </div>
+                </div>}
               </motion.div>
             </motion.div>
           ) : (
@@ -1877,7 +2056,18 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
               animate={{ opacity: 1 }}
               className="flex justify-center items-center h-full text-gray-500 w-full absolute inset-0 font-medium"
             >
-              Hết hồ sơ để xem
+              <div className="flex flex-col items-center gap-5 px-8 text-center">
+                <p className="font-bold">Đã hết hồ sơ trong khu vực của bạn, bạn hãy tăng thêm khoảng cách tối đa để xem thêm hồ sơ</p>
+                {onClose ? (
+                  <button onClick={onClose} className="rounded-full bg-sky-600 px-5 py-3 font-bold text-white">Quay lại khám phá</button>
+                ) : (
+                  <button onClick={() => setTopActionModal('settings')} className="rounded-full bg-sky-600 px-5 py-3 font-bold text-white">Điều chỉnh khoảng cách</button>
+                )}
+                {canReplay && <>
+                  <button disabled={isReplaying} onClick={() => { void replayAndReset(); }} className="rounded-full bg-gradient-to-r from-indigo-500 to-sky-500 px-6 py-3 font-extrabold text-white shadow-lg active:scale-95 disabled:opacity-60">{isReplaying ? 'Đang tải hồ sơ…' : 'Xem lại hồ sơ'}</button>
+                  {replayError && <p className="text-sm font-semibold text-rose-600">Chưa thể tải lại hồ sơ. Vui lòng thử lại.</p>}
+                </>}
+              </div>
             </motion.div>
           )}
         </AnimatePresence>
@@ -1922,10 +2112,10 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
                    </div>
                    <div className="flex -space-x-3 mb-1">
                       <div className="w-[46px] h-[46px] rounded-full border-[2px] border-[#1e0a45] overflow-hidden shrink-0 bg-gray-500 z-10 shadow-sm">
-                         <img src={myProfile.images?.[0]} className="w-full h-full object-cover" />
+                         <img src={myProfile.images?.[0] || 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&q=80&w=400'} className="w-full h-full object-cover" />
                       </div>
                       <div className="w-[46px] h-[46px] rounded-full border-[2px] border-[#1e0a45] overflow-hidden shrink-0 bg-gray-500 z-20 shadow-sm">
-                         <img src={currentProfile.images?.[0]} className="w-full h-full object-cover" />
+                         <img src={currentProfile.images?.[0] || 'https://images.unsplash.com/photo-1517841905240-472988babdf9?auto=format&fit=crop&q=80&w=400'} className="w-full h-full object-cover" />
                       </div>
                    </div>
                 </div>
@@ -1986,11 +2176,11 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
                                <span className="font-bold text-[16px] text-white">Cách nhìn nhận của nửa kia</span>
                             </div>
                             <p className="font-bold text-[15px] leading-relaxed text-white mt-1">
-                               {getPartnerPerspectiveText(myProfile?.zodiac || 'Bạch Dương', currentProfile?.zodiac || 'Bạch Dương', currentProfile?.name || 'Họ')}
-                            </p>
-                        </div>
-                    </div>
-                 </div>
+                                {getPartnerPerspectiveText(myProfile?.zodiac || 'Bạch Dương', currentProfile?.zodiac || 'Bạch Dương', currentProfile?.name || 'Họ')}
+                             </p>
+                         </div>
+                     </div>
+                  </div>
 
                  {/* Pagination Dots */}
                  <div className="flex justify-center gap-1.5 mb-8">
@@ -2134,76 +2324,44 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
 
       <AnimatePresence>
         {topActionModal === 'music' && (
-          <motion.div 
-             initial={{ opacity: 0, y: '100%' }}
-             animate={{ opacity: 1, y: 0 }}
-             exit={{ opacity: 0, y: '100%' }}
-             transition={{ type: "spring", damping: 25, stiffness: 200 }}
-             className="absolute inset-0 z-50 bg-[#160b2b] flex flex-col text-white"
-          >
-             <div className="relative pt-6 px-4 pb-4 z-10 shrink-0 border-b border-white/10">
-                <button onClick={() => setTopActionModal(null)} className="absolute left-4 top-6 p-1 bg-white/10 rounded-full active:scale-90 transition-transform">
-                   <ChevronDown className="w-6 h-6 text-white" />
-                </button>
-                <div className="flex flex-col items-center">
-                   <h2 className="text-[18px] font-bold">Tải nhạc nền</h2>
-                </div>
-             </div>
-             
-             <div className="flex-1 overflow-y-auto px-4 py-8 flex flex-col items-center">
-                <div className="w-24 h-24 bg-white/5 rounded-full flex justify-center items-center mb-6 border border-white/10">
-                   <Music className="w-10 h-10 text-pink-400" />
-                </div>
-                <h3 className="text-[20px] font-bold mb-2">Mang âm nhạc vào hồ sơ</h3>
-                <p className="text-white/60 text-center text-[15px] px-4 mb-8">
-                   Thể hiện phong cách cá nhân bằng cách thêm một bài hát nền vào hồ sơ của bạn.
-                </p>
-                <input type="file" accept="audio/*" ref={musicInputRef} className="hidden" onChange={(e) => {
-                    if (e.target.files && e.target.files[0]) {
-                       const file = e.target.files[0];
-                       setIsUploadingMusic(true);
-                       const reader = new FileReader();
-                       reader.onload = async (event) => {
-                           if (event.target?.result) {
-                               const base64Audio = event.target.result as string;
-                               const userId = sessionStorage.getItem('user_id') || localStorage.getItem('user_id') || (myProfile && myProfile.id ? myProfile.id.toString() : '');
-                               if (userId) {
-                                   try {
-                                       await fetch(`/api/users/${userId}/song`, {
-                                           method: 'POST',
-                                           headers: { 'Content-Type': 'application/json' },
-                                           body: JSON.stringify({ songTitle: file.name, songData: base64Audio })
-                                       });
-                                   } catch (err) { console.error('Upload failed'); }
-                               }
-                               if (!globalAudioCache[file.name]) {
-                                   globalAudioCache[file.name] = URL.createObjectURL(file);
-                               }
-                               updateMyProfile({ songTitle: file.name, songUrl: globalAudioCache[file.name] });
-                               setIsUploadingMusic(false);
-                               setTopActionModal(null);
-                           }
-                       };
-                       reader.readAsDataURL(file);
-                    }
-                 }} />
-                 {isUploadingMusic ? (
-                     <div className="flex flex-col items-center gap-3 py-3">
-                         <div className="w-8 h-8 border-4 border-pink-500 border-t-transparent rounded-full animate-spin"></div>
-                         <p className="text-[14px] text-pink-400 font-semibold animate-pulse">Đang tải nhạc lên hệ thống, vui lòng chờ chút nhé...</p>
-                     </div>
-                 ) : (
-                     <button className="w-[80%] bg-pink-600 font-bold text-white py-3.5 rounded-full shadow-lg active:scale-95 transition-transform" onClick={() => musicInputRef.current?.click()}>
-                        Tải bài hát lên
-                     </button>
-                 )}
-                 {myProfile.songTitle && (
-                    <p className="mt-6 text-green-400 font-bold text-center px-4 w-full truncate border border-green-500/20 bg-green-500/10 rounded-xl py-3">Bài hát hiện tại: {myProfile.songTitle}</p>
-                 )}
-             </div>
-          </motion.div>
+          <MusicClipModal
+            userId={myProfile?.id || sessionStorage.getItem('user_id') || localStorage.getItem('user_id') || ''}
+            currentTitle={myProfile?.songTitle}
+            onClose={() => setTopActionModal(null)}
+            onSaved={(songTitle) => {
+              updateMyProfile({ songTitle, songUrl: '' });
+            }}
+          />
         )}
-        
+        {topActionModal === 'lunar' && (
+          <LunarAnimalsModal
+            isOpen={topActionModal === 'lunar'}
+            onClose={() => setTopActionModal(null)}
+            userDob={myProfile?.dob}
+            userName={myProfile?.name}
+          />
+        )}
+
+        {topActionModal === 'moments' && (
+          <MomentsView
+            onClose={() => setTopActionModal(null)}
+            myProfile={myProfile}
+            onStartChat={startMomentChat}
+          />
+        )}
+
+        {topActionModal === 'premium' && (
+          <PremiumModal
+            isOpen={topActionModal === 'premium'}
+            onClose={() => setTopActionModal(null)}
+            userName={myProfile?.name}
+            onPremiumActivated={() => {
+              updateMyProfile({ isPremium: true });
+              window.dispatchEvent(new Event('premium_activated'));
+            }}
+          />
+        )}
+
         {topActionModal === 'astrology' && (
           <motion.div 
              initial={{ opacity: 0, y: '100%' }}
@@ -2217,7 +2375,7 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
                    <ChevronDown className="w-6 h-6 text-white" />
                 </button>
                 <div className="flex flex-col items-center">
-                   <h2 className="text-[18px] font-bold">Chiêm tinh của bạn</h2>
+                   <h2 className="text-[18px] font-bold">Cung hoàng đạo của bạn</h2>
                 </div>
              </div>
              
@@ -2240,9 +2398,10 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
                        {ZODIAC_LIST.map((z) => {
                           const score = calculateZodiacCompatibility(myProfile.zodiac || 'Song Tử')[z];
                           return (
-                            <div key={z} className="bg-white/5 p-3 rounded-xl border border-white/10 text-center">
-                               <div className="text-xl mb-1">{ZODIAC_DATA[z]?.symbol}</div>
-                               <div className={`text-xs font-bold ${score >= 70 ? 'text-pink-400' : 'text-gray-400'}`}>{score}%</div>
+                            <div key={z} className="bg-white/5 p-3 rounded-xl border border-white/10 text-center flex flex-col items-center">
+                               <div className="text-2xl mb-1">{ZODIAC_DATA[z]?.symbol}</div>
+                               <div className="text-[12px] font-extrabold text-white mb-0.5">{z}</div>
+                               <div className={`text-xs font-bold ${score >= 70 ? 'text-sky-300' : 'text-gray-400'}`}>{score}% tương thích</div>
                             </div>
                           );
                        })}
@@ -2252,8 +2411,123 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
           </motion.div>
         )}
 
+        {topActionModal === 'zodiacCompatibility' && (
+          <motion.div
+            initial={{ opacity: 0, y: '100%' }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: '100%' }}
+            transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+            className="absolute inset-0 z-[75] flex flex-col bg-[#10152e] text-white"
+          >
+            <div className="relative shrink-0 border-b border-indigo-200/15 px-4 pb-4 pt-7">
+              <button onClick={() => setTopActionModal(null)} className="absolute left-4 top-7 rounded-full bg-white/10 p-1.5 transition-transform active:scale-90" aria-label="Đóng">
+                <ChevronDown className="h-6 w-6" />
+              </button>
+              <div className="text-center">
+                <p className="text-xs font-extrabold uppercase tracking-[0.25em] text-indigo-200">Bản đồ kết nối</p>
+                <h2 className="mt-1 text-xl font-black">Tương hợp 12 cung hoàng đạo</h2>
+              </div>
+            </div>
+
+            <div className="relative flex-1 overflow-y-auto px-4 pb-5 pt-5">
+              <div className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top,_rgba(99,102,241,0.28),_transparent_55%),radial-gradient(ellipse_at_bottom_right,_rgba(14,165,233,0.18),_transparent_45%)]" />
+              <div className="relative mx-auto max-w-xl">
+                <div className="grid grid-cols-2 gap-3">
+                  {[
+                    { label: 'Cung của bạn', value: compatibilityZodiac, onChange: setCompatibilityZodiac },
+                    { label: 'Cung đối phương', value: partnerCompatibilityZodiac, onChange: setPartnerCompatibilityZodiac },
+                  ].map(({ label, value, onChange }) => (
+                    <label key={label} className="rounded-2xl border border-indigo-100/15 bg-white/[0.07] p-3 shadow-lg shadow-indigo-950/20">
+                      <span className="mb-2 block text-[11px] font-bold uppercase tracking-wide text-indigo-100/65">{label}</span>
+                      <span className="mb-2 block text-center text-4xl text-indigo-100">{ZODIAC_DATA[value]?.symbol || '✦'}</span>
+                      <select value={value} onChange={event => onChange(event.target.value)} className="w-full rounded-xl border border-white/10 bg-[#191e3c] px-2 py-2 text-center text-sm font-extrabold text-white outline-none focus:border-indigo-300">
+                        {ZODIAC_LIST.map(sign => <option key={sign} value={sign}>{sign}</option>)}
+                      </select>
+                    </label>
+                  ))}
+                </div>
+
+                <div className="my-4 rounded-3xl border border-indigo-200/20 bg-gradient-to-br from-indigo-500/20 via-white/[0.07] to-sky-400/10 p-5 text-center shadow-xl shadow-indigo-950/25">
+                  <div className="mx-auto flex h-24 w-24 items-center justify-center rounded-full border border-indigo-200/30 bg-[#10152e]/70 shadow-[0_0_35px_rgba(129,140,248,0.22)]">
+                    <span className="text-4xl font-black text-indigo-100">{zodiacCompatibilityScore}%</span>
+                  </div>
+                  <p className="mt-3 text-xs font-bold uppercase tracking-[0.2em] text-indigo-200">Độ tương hợp</p>
+                  <h3 className="mt-1 text-lg font-black">{compatibilityZodiac} <span className="text-indigo-200">×</span> {partnerCompatibilityZodiac}</h3>
+                  <p className="mt-2 text-sm leading-relaxed text-white/75">{getElementComboText(compatibilityZodiac, partnerCompatibilityZodiac)}</p>
+                  <p className="mt-3 text-xs leading-relaxed text-indigo-100/70">Chiêm tinh mang tính tham khảo, giúp hai bạn có thêm góc nhìn để trò chuyện và thấu hiểu nhau.</p>
+                </div>
+
+                <div className="rounded-3xl border border-white/10 bg-slate-950/35 p-4">
+                  <div className="mb-3 flex items-center gap-2">
+                    <Star className="h-4 w-4 fill-amber-300 text-amber-300" />
+                    <h3 className="text-sm font-extrabold">Chọn một cung để xem độ tương hợp</h3>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {ZODIAC_LIST.map(sign => {
+                      const score = calculateZodiacCompatibility(compatibilityZodiac)[sign] || 50;
+                      const selected = sign === partnerCompatibilityZodiac;
+                      return (
+                        <button key={sign} onClick={() => setPartnerCompatibilityZodiac(sign)} className={`rounded-2xl border p-2 text-center transition active:scale-95 ${selected ? 'border-indigo-300 bg-indigo-400/20 shadow-md shadow-indigo-950/30' : 'border-white/10 bg-white/[0.04] hover:bg-white/10'}`}>
+                          <span className="block text-2xl">{ZODIAC_DATA[sign]?.symbol || '✦'}</span>
+                          <span className="mt-1 block truncate text-[11px] font-extrabold">{sign}</span>
+                          <span className={`mt-0.5 block text-[10px] font-bold ${score >= 75 ? 'text-sky-200' : 'text-indigo-100/65'}`}>{score}%</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="shrink-0 border-t border-white/10 bg-[#10152e]/95 p-4 pb-[calc(env(safe-area-inset-bottom)+16px)]">
+              <button
+                onClick={() => {
+                  const promptText = `Cupid AI, hãy phân tích kết quả chiêm tinh tương hợp của cặp ${compatibilityZodiac} và ${partnerCompatibilityZodiac}. Điểm tham khảo hiện tại là ${zodiacCompatibilityScore}%. Hãy giải thích điểm hòa hợp, khác biệt trong cảm xúc và giao tiếp, những điều hai người có thể học hỏi ở nhau, cùng một vài gợi ý hẹn hò và trò chuyện tinh tế. Nhắc mình rằng chiêm tinh chỉ mang tính tham khảo.`;
+                  window.dispatchEvent(new CustomEvent('cupid_send_prompt', { detail: { prompt: promptText } }));
+                  setTopActionModal(null);
+                }}
+                className="flex w-full items-center justify-center gap-2 rounded-2xl bg-gradient-to-r from-indigo-400 via-sky-400 to-cyan-300 px-4 py-3.5 font-extrabold text-slate-950 shadow-lg shadow-sky-950/30 transition hover:brightness-110 active:scale-[0.99]"
+              >
+                <Send className="h-5 w-5" /> Đưa kết quả cho Cupid AI phân tích
+              </button>
+            </div>
+          </motion.div>
+        )}
+
         {topActionModal === 'tarot' && (
-          <TarotReadingFlow onClose={() => setTopActionModal(null)} />
+          <TarotInteractiveModal
+            isOpen={topActionModal === 'tarot'}
+            onClose={() => setTopActionModal(null)}
+            onSendToCupid={(promptText) => {
+              setTopActionModal(null);
+              try {
+                const saved = localStorage.getItem('ais_chat_Cupid AI') || localStorage.getItem('cupid_ai_messages') || '[]';
+                const parsed = JSON.parse(saved);
+                const userMsg = {
+                  id: Date.now(),
+                  sender: 'me',
+                  text: promptText,
+                  time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                };
+                const updated = [...parsed, userMsg];
+                localStorage.setItem('ais_chat_Cupid AI', JSON.stringify(updated));
+                localStorage.setItem('cupid_ai_messages', JSON.stringify(updated));
+                window.dispatchEvent(new CustomEvent('cupid_chat_sync', { detail: { messages: updated } }));
+                if (setActiveChatUser) {
+                  setActiveChatUser({
+                    id: 'cupid-ai',
+                    name: 'Cupid AI',
+                    img: 'https://images.unsplash.com/photo-1518199266791-5375a83190b7?auto=format&fit=crop&q=80&w=800'
+                  });
+                }
+                if (onNavigate) {
+                  onNavigate('chats');
+                }
+              } catch (e) {}
+            }}
+            userZodiac={myProfile?.zodiac}
+            userName={myProfile?.name}
+          />
         )}
 
         {topActionModal === 'settings' && (
@@ -2272,24 +2546,36 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
              </div>
              
              <div className="flex-1 overflow-y-auto px-4 pb-12 pt-2">
-                {/* Horizontal Chips section */}
-                <div className="bg-[#222] rounded-3xl pt-2 px-2 pb-6 mb-6 mt-2">
-                   <div className="flex gap-3 overflow-x-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none]">
-                     {['Dành Cho Bạn', 'Chiêm tinh', 'Âm nhạc'].map(cat => (
-                        <button 
-                          key={cat} 
-                          onClick={() => toggleLocalPriority(cat)}
-                           className={`rounded-full px-5 py-2 text-[14px] font-bold shrink-0 transition-colors ${
-                              (localSettings.activePriorities || []).includes(cat) 
-                                 ? 'border border-white bg-transparent text-white' 
-                                 : 'border border-white/20 bg-transparent text-white/50'
-                           }`}
-                        >
-                           {cat}
-                        </button>
-                     ))}
-                   </div>
-                </div>
+                 <div className="mb-6 mt-2 rounded-3xl border border-white/10 bg-gradient-to-br from-[#222b3d] to-[#1a1d29] p-4 shadow-lg shadow-black/10">
+                    <div className="mb-3">
+                      <h3 className="text-[15px] font-extrabold">Ưu tiên hồ sơ</h3>
+                      <p className="mt-1 text-xs leading-relaxed text-white/55">Chọn một hoặc nhiều mục để xếp hồ sơ phù hợp lên trước. Tiêu chí tuổi, khoảng cách và giới tính vẫn được áp dụng.</p>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      {[
+                        { label: 'Dành Cho Bạn', icon: '💞' },
+                        { label: 'Khoảnh khắc', icon: '📸' },
+                        { label: 'Tử vi', icon: '🐉' },
+                        { label: 'Âm nhạc', icon: '🎵' },
+                        { label: 'Cung hoàng đạo', icon: '♈' },
+                        { label: 'Trải bài Tarot', icon: '🎴' },
+                      ].map(({ label, icon }) => {
+                        const selected = (localSettings.activePriorities || []).includes(label);
+                        return (
+                          <button
+                            key={label}
+                            onClick={() => toggleLocalPriority(label)}
+                            aria-pressed={selected}
+                            className={`flex min-h-11 items-center gap-2 rounded-xl border px-3 py-2 text-left text-[12px] font-extrabold transition-all active:scale-[0.98] ${selected ? 'border-sky-300/70 bg-sky-400/15 text-sky-100 shadow-md shadow-sky-950/20' : 'border-white/10 bg-white/[0.03] text-white/60 hover:bg-white/[0.08]'}`}
+                          >
+                            <span className="text-base">{icon}</span><span className="leading-tight">{label}</span>
+                            {selected && <Check className="ml-auto h-4 w-4 shrink-0 text-sky-300" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="mt-3 text-[11px] leading-relaxed text-white/45">Khoảnh khắc, âm nhạc, ngày sinh, cung hoàng đạo và sở thích Tarot được dùng để xếp hạng; các mục không có dữ liệu sẽ không loại hồ sơ khỏi danh sách.</p>
+                 </div>
 
                 {/* Location Section */}
                 <div className="bg-[#222] rounded-2xl p-5 mb-4">
@@ -2317,27 +2603,16 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
                       <div className="w-full relative mb-2 h-[24px] flex items-center">
                          <input 
                             type="range" 
-                            min="2" max="160" 
+                            min="2" max="1000" 
                             value={localSettings.distance} 
                             onChange={(e) => updateLocalSettings({ distance: parseInt(e.target.value) })}
                             className="w-full absolute inset-0 opacity-0 cursor-pointer z-10" 
                           />
                          <div className="w-full h-[4px] bg-white/20 rounded-full relative pointer-events-none">
-                            <div className="absolute left-0 top-0 bottom-0 bg-[#ff2d55] rounded-full" style={{ width: `${(localSettings.distance / 160) * 100}%` }}></div>
-                            <div className="absolute top-1/2 -translate-y-1/2 w-6 h-6 bg-[#ff2d55] rounded-full shadow-md" style={{ left: `calc(${(localSettings.distance / 160) * 100}% - 12px)` }}></div>
+                            <div className="absolute left-0 top-0 bottom-0 bg-[#ff2d55] rounded-full" style={{ width: `${(localSettings.distance / 1000) * 100}%` }}></div>
+                            <div className="absolute top-1/2 -translate-y-1/2 w-6 h-6 bg-[#ff2d55] rounded-full shadow-md" style={{ left: `calc(${(localSettings.distance / 1000) * 100}% - 12px)` }}></div>
                          </div>
                       </div>
-                   </div>
-                   <div className="p-5 flex items-center justify-between">
-                      <span className="text-[16px] font-medium w-[75%] leading-snug">Hiển thị những người ở xa hơn nếu tôi hết hồ sơ để xem</span>
-                      <button 
-                        onClick={() => updateLocalSettings({ isDistanceFlexible: !localSettings.isDistanceFlexible })}
-                        className={`w-[44px] h-[26px] rounded-full relative shrink-0 transition-colors ${localSettings.isDistanceFlexible ? 'bg-[#ff2d55]' : 'bg-white/20'}`}
-                      >
-                         <div className={`absolute top-0.5 w-[22px] h-[22px] bg-white rounded-full flex items-center justify-center shadow-sm transition-transform ${localSettings.isDistanceFlexible ? 'right-0.5' : 'left-0.5'}`}>
-                            {localSettings.isDistanceFlexible && <Check className="w-[14px] h-[14px] text-[#ff2d55]" strokeWidth={4} />}
-                         </div>
-                      </button>
                    </div>
                 </div>
 
@@ -2504,8 +2779,39 @@ export function ProfileSwiper({ profiles, title, onClose, onReachEnd }: { profil
 }
 
 export function SwipeView() {
-  const { settings, isTestFemaleView, myProfile, serverUsers, likedProfiles, savedProfiles, swipedRecords, fetchMoreUsers } = React.useContext(AppContext);
-  const allProfiles = serverUsers.length > 0 ? serverUsers : MATCH_PROFILES;
+  const { settings, isTestFemaleView, myProfile, serverUsers, likedProfiles, savedProfiles, swipedRecords, fetchMoreUsers, replayProfiles, updateMyProfile } = React.useContext(AppContext);
+  const allProfiles = serverUsers;
+  const sessionShuffleSeed = React.useRef(Math.random());
+  const [feedAdvertisements, setFeedAdvertisements] = useState<any[]>([]);
+  const [isPremiumAccount, setIsPremiumAccount] = useState(false);
+  const likedProfilesRef = React.useRef(likedProfiles);
+  const swipedRecordsRef = React.useRef(swipedRecords);
+  likedProfilesRef.current = likedProfiles;
+  swipedRecordsRef.current = swipedRecords;
+
+  useEffect(() => {
+    let isCurrent = true;
+    apiFetch('/api/advertisements/feed')
+      .then(response => response.json())
+      .then(data => {
+        if (!isCurrent || !data.success) return;
+        setIsPremiumAccount(!!data.isPremium);
+        setFeedAdvertisements(Array.isArray(data.advertisements) ? data.advertisements : []);
+      })
+      .catch(() => {
+        if (isCurrent) {
+          setIsPremiumAccount(false);
+          setFeedAdvertisements([]);
+        }
+      });
+    return () => { isCurrent = false; };
+  }, []);
+
+  useEffect(() => {
+    const activatePremium = () => setIsPremiumAccount(true);
+    window.addEventListener('premium_activated', activatePremium);
+    return () => window.removeEventListener('premium_activated', activatePremium);
+  }, []);
 
   const computePool = React.useCallback((usersList: any[]) => {
      let basePool = isTestFemaleView ? [myProfile] : filterProfiles(usersList, settings, myProfile.gender);
@@ -2513,24 +2819,7 @@ export function SwipeView() {
         basePool = basePool.filter(p => p.id !== myProfile.id && (!p.email || p.email !== myProfile.email));
      }
      
-     // Fallback matching if filters are too strict
-     if (!isTestFemaleView && basePool.length === 0) {
-        basePool = usersList.filter(p => {
-           let pGender = p.gender || 'Nữ';
-           if (!p.gender && p.name && (p.name.includes('Hoàng Anh') || p.name.includes('Đăng') || p.name.includes('Đại') || p.name.includes('Tuấn'))) pGender = 'Nam';
-           if (settings.interestedIn === 'Mọi người') return true;
-           if (settings.interestedIn === 'Nam') return pGender === 'Nam';
-           if (settings.interestedIn === 'Nữ') return pGender === 'Nữ';
-           if (settings.interestedIn === 'LGBTQ+') return pGender === 'LGBTQ+';
-           if (settings.interestedIn === 'Khác') return pGender === 'Khác';
-           
-           if (myProfile.gender === 'Nữ') return pGender === 'Nam';
-           if (myProfile.gender === 'Nam') return pGender === 'Nữ';
-           return true; 
-        }).filter(p => p.id !== myProfile.id && (!p.email || p.email !== myProfile.email));
-     }
-
-     const getCommonPointsData = (p: any) => {
+      const getCommonPointsData = (p: any) => {
         let count = 0;
         let matchedLabels: string[] = [];
         const checkMatch = (key: string, label: string) => {
@@ -2549,55 +2838,100 @@ export function SwipeView() {
             text = `Vì cùng chung: ${matchedLabels.slice(0, 3).join(', ')}${count > 3 ? '...' : ''}`;
         }
         return { count, text };
-     };
+      };
 
-     const scoredPool = basePool.map(p => {
+      const aliases: Record<string, string> = { 'Chiêm tinh': 'Cung hoàng đạo', '12 Con Giáp': 'Tử vi', '12 con giáp': 'Tử vi', 'Tarot': 'Trải bài Tarot', 'Trải bài tarot': 'Trải bài Tarot' };
+      const selectedPriorities = [...new Set((Array.isArray(settings.activePriorities) ? settings.activePriorities : ['Dành Cho Bạn']).map((priority: string) => aliases[priority] || priority))].filter((priority: string) => priority !== 'Dành Cho Bạn');
+      const getPriorityScore = (profile: any) => {
+        const profileInterests = Array.isArray(profile.interests) ? profile.interests : [];
+        const matches: Record<string, boolean> = {
+          'Khoảnh khắc': Boolean(profile.hasMoments),
+          'Tử vi': Boolean(profile.hasBirthDate || profile.dob),
+          'Âm nhạc': Boolean(profile.songTitle),
+          'Cung hoàng đạo': Boolean(profile.hasZodiac || profile.zodiac),
+          'Trải bài Tarot': Boolean(profile.tarotInterest || profileInterests.some((interest: string) => /tarot/i.test(interest))),
+        };
+        return selectedPriorities.reduce((score: number, priority: string) => score + Number(Boolean(matches[priority])), 0);
+      };
+
+      const scoredPool = basePool.map(p => {
         const cpd = getCommonPointsData(p);
-        const noise = Math.random() * 4.0;
+        const compatibilityScore = calculateFullCompatibility(myProfile, p).totalScore;
         return {
           ...p,
+           compatibilityScore,
+           priorityScore: getPriorityScore(p),
           scoredCommonPoints: cpd.count,
           commonPoints: p.commonPoints && p.commonPoints.startsWith('Hợp gu') ? p.commonPoints : cpd.text,
-          _sortWeight: cpd.count + noise
-        };
+       };
      });
 
-     const likedIds = new Set((likedProfiles || []).map(p => p.id));
-     const viewedIds = new Set((swipedRecords || []).map(r => r.target_user_id));
+     const likedIds = new Set((likedProfilesRef.current || []).map((profile: any) => Number(profile.id)));
+     const viewedIds = new Set((swipedRecordsRef.current || []).map((record: any) => Number(record.target_user_id)));
+     const currentFeedProfileId = sessionStorage.getItem('swipe_id_feed');
+     const feedPool = scoredPool.filter(profile =>
+       !likedIds.has(Number(profile.id))
+       && (!viewedIds.has(Number(profile.id)) || String(profile.id) === String(currentFeedProfileId))
+     );
+     const tieScore = (profile: any) => Math.sin((Number(profile.id) || 0) * 12.9898 + sessionShuffleSeed.current * 78.233);
 
-     const unlikedPool = scoredPool.filter(p => !likedIds.has(p.id));
-     let finalPool = unlikedPool.filter(p => !viewedIds.has(p.id));
-
-     if (finalPool.length === 0 && unlikedPool.length > 0) {
-        finalPool = unlikedPool; // loop back, using passed profiles but still omitting liked ones!
-     }
-
-     return [...finalPool].sort((a, b) => b._sortWeight - a._sortWeight);
-  }, [settings, myProfile, isTestFemaleView, likedProfiles, swipedRecords]);
+      return [...feedPool].sort((a, b) => {
+         const compatibilityDiff = b.compatibilityScore - a.compatibilityScore;
+         if (compatibilityDiff) return compatibilityDiff;
+         const priorityDiff = b.priorityScore - a.priorityScore;
+         if (priorityDiff) return priorityDiff;
+         if (Boolean(a.isPremium) !== Boolean(b.isPremium)) return a.isPremium ? -1 : 1;
+         const distanceA = a.distanceKm == null ? Number.POSITIVE_INFINITY : Number(a.distanceKm);
+        const distanceB = b.distanceKm == null ? Number.POSITIVE_INFINITY : Number(b.distanceKm);
+        if (distanceA !== distanceB) return distanceA - distanceB;
+        const createdA = new Date(a.createdAt || 0).getTime() || 0;
+        const createdB = new Date(b.createdAt || 0).getTime() || 0;
+        if (createdA !== createdB) return createdB - createdA;
+        return tieScore(a) - tieScore(b);
+     });
+  }, [settings, myProfile, isTestFemaleView]);
 
   const [activePool, setActivePool] = useState<any[]>(() => computePool(allProfiles));
-  
-  const currentPrefRefString = `${allProfiles.length}-${settings.distance}-${settings.ageMin}-${settings.ageMax}-${settings.interestedIn}-${settings.location}-${settings.activePriorities?.join(',') || ''}-${settings.isAgeFlexible}-${settings.isDistanceFlexible}-${isTestFemaleView}`;
+  const profilesWithAds = React.useMemo(() => {
+    if (isPremiumAccount || feedAdvertisements.length === 0) return activePool;
+    const items: any[] = [];
+    activePool.forEach((profile, index) => {
+      items.push(profile);
+      const shouldInsertAd = (index + 1) % 5 === 0 && index < activePool.length - 1;
+      if (shouldInsertAd) {
+        const ad = feedAdvertisements[Math.floor(index / 5) % feedAdvertisements.length];
+        items.push({ ...ad, type: 'advertisement', id: `ad-${ad.id}-${index + 1}` });
+      }
+    });
+    return items;
+  }, [activePool, feedAdvertisements, isPremiumAccount]);
+
+  const candidateSignature = allProfiles.map(profile => `${profile.id}:${profile.distanceKm ?? 'x'}:${profile.createdAt || ''}`).join(',');
+  const currentPrefRefString = `${candidateSignature}-${JSON.stringify(settings)}-${JSON.stringify([myProfile.id, myProfile.lat, myProfile.lng, myProfile.dob, myProfile.zodiac, myProfile.pet, myProfile.music, myProfile.book, myProfile.food, myProfile.travel, myProfile.game, myProfile.sport, myProfile.religion, myProfile.need, myProfile.job])}-${isTestFemaleView}`;
   const lastPrefRefKey = useRef<string>(currentPrefRefString);
 
   useEffect(() => {
-    const prefRefKey = `${allProfiles.length}-${settings.distance}-${settings.ageMin}-${settings.ageMax}-${settings.interestedIn}-${settings.location}-${settings.activePriorities?.join(',') || ''}-${settings.isAgeFlexible}-${settings.isDistanceFlexible}-${isTestFemaleView}`;
+    const prefRefKey = `${candidateSignature}-${JSON.stringify(settings)}-${JSON.stringify([myProfile.id, myProfile.lat, myProfile.lng, myProfile.dob, myProfile.zodiac, myProfile.pet, myProfile.music, myProfile.book, myProfile.food, myProfile.travel, myProfile.game, myProfile.sport, myProfile.religion, myProfile.need, myProfile.job])}-${isTestFemaleView}`;
     const prefChanged = lastPrefRefKey.current !== prefRefKey;
     
-    if (prefChanged || activePool.length === 0) {
+    if (prefChanged) {
        lastPrefRefKey.current = prefRefKey;
        setActivePool(computePool(allProfiles));
     }
-  }, [allProfiles, settings, myProfile, isTestFemaleView, likedProfiles, swipedRecords, activePool.length, computePool]);
+  }, [allProfiles, candidateSignature, settings, myProfile, isTestFemaleView, activePool.length, computePool]);
 
   return (
     <ProfileSwiper 
-       key={activePool.map(p => p.id).join(',')} 
-       profiles={activePool} 
+       profiles={profilesWithAds} 
        title="Dành cho bạn" 
+       storageKey="swipe_id_feed"
+       canReplay={isPremiumAccount}
+       onReplay={async () => {
+          const replayed = await replayProfiles();
+           return replayed;
+       }}
        onReachEnd={() => {
-          sessionStorage.removeItem('swipe_id_Dành cho bạn');
-          setActivePool([]); // Triggers full scan & loop logic inside our layout wrapper
+          sessionStorage.removeItem('swipe_id_feed');
           if (fetchMoreUsers) fetchMoreUsers();
        }} 
     />
@@ -2606,44 +2940,32 @@ export function SwipeView() {
 
 // Explore View
 export function ExploreView() {
-  const { settings, serverUsers, myProfile, likedProfiles, savedProfiles } = React.useContext(AppContext);
+  const { exploreUsers, myProfile, fetchMoreUsers } = React.useContext(AppContext);
   const [selectedMainCategory, setSelectedMainCategory] = useState<any>(null);
   const [selectedSubCategory, setSelectedSubCategory] = useState<any>(null);
 
-  const allProfiles = serverUsers.length > 0 ? serverUsers : MATCH_PROFILES;
-  let filteredExploreProfiles = filterProfiles(allProfiles, settings, myProfile.gender, true).filter(p => {
-     if (p.id === myProfile.id || (p.email && p.email === myProfile.email)) return false;
-     const isLikedOrSaved = (likedProfiles || []).some(lp => lp && lp.id === p.id) || (savedProfiles || []).some(sp => sp && sp.id === p.id);
-     return !isLikedOrSaved;
-  });
-
-  if (filteredExploreProfiles.length === 0) {
-      filteredExploreProfiles = allProfiles.filter(p => {
-         let pGender = p.gender || 'Nữ';
-         if (!p.gender && (p.name.includes('Hoàng Anh') || p.name.includes('Đăng') || p.name.includes('Đại') || p.name.includes('Tuấn'))) pGender = 'Nam';
-         if (settings.interestedIn === 'Mọi người') return true;
-         if (settings.interestedIn === 'Nam') return pGender === 'Nam';
-         if (settings.interestedIn === 'Nữ') return pGender === 'Nữ';
-         if (settings.interestedIn === 'LGBTQ+') return pGender === 'LGBTQ+';
-         if (settings.interestedIn === 'Khác') return pGender === 'Khác';
-         
-         if (myProfile.gender === 'Nữ') return pGender === 'Nam';
-         if (myProfile.gender === 'Nam') return pGender === 'Nữ';
-         return true;
-      }).filter(p => {
-         if (p.id === myProfile.id || (p.email && p.email === myProfile.email)) return false;
-         const isLikedOrSaved = (likedProfiles || []).some(lp => lp && lp.id === p.id) || (savedProfiles || []).some(sp => sp && sp.id === p.id);
-         return !isLikedOrSaved;
-      });
-  }
+  useEffect(() => { fetchMoreUsers(true); }, [fetchMoreUsers]);
+  const filteredExploreProfiles = (exploreUsers || []).filter(profile => Number(profile.id) !== Number(myProfile.id));
+  const normalizeExploreValue = (value: any): string => String(value || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/đ/g, 'd').replace(/Đ/g, 'D').toLowerCase().trim();
+  const flattenExploreValues = (value: any): string[] => {
+    if (Array.isArray(value)) return value.flatMap(flattenExploreValues);
+    if (value && typeof value === 'object') return Object.values(value).flatMap(flattenExploreValues);
+    return value == null ? [] : [String(value)];
+  };
+  const hasExploreValue = (value: any, reject: string[] = []) =>
+    flattenExploreValues(value).some(item => {
+      const clean = normalizeExploreValue(item);
+      return !!clean && !['khac', 'khong ro', 'chua cap nhat', 'khong nuoi', 'khong choi', ...reject].some(word => clean === normalizeExploreValue(word));
+    });
+  const hasInterest = (profile: any, words: string[]) => {
+    const interests = flattenExploreValues(profile.interests).map(normalizeExploreValue);
+    return interests.some(interest => words.some(word => interest.includes(normalizeExploreValue(word))));
+  };
 
   const checkNeed = (needVal: any, allowedValues: string[]) => {
-     if (!needVal) return false;
-     const val = String(needVal).toLowerCase().trim();
-     return allowedValues.some(a => {
-        const cleanA = a.toLowerCase().trim();
-        return val.includes(cleanA) || cleanA.includes(val);
-     });
+     const values = flattenExploreValues(needVal).map(normalizeExploreValue).filter(Boolean);
+     const allowed = allowedValues.map(normalizeExploreValue);
+     return values.some(value => allowed.some(item => value.includes(item) || item.includes(value)));
   };
 
   const categories = [
@@ -2662,9 +2984,9 @@ export function ExploreView() {
        title: 'Đồng điệu tính cách', 
        img: 'https://images.unsplash.com/photo-1578683010236-d716f9a3f461?auto=format&fit=crop&q=80&w=800',
        subCategories: [
-         { id: 'thu_cung', title: 'Yêu thú cưng', icon: '🐶', profiles: filteredExploreProfiles.filter((p: any) => { const v = p.pet || p.lifestyle?.pet; return v && v !== 'Không nuôi' && v !== 'Dị ứng với động vật' }) },
-         { id: 'nghe_nhac', title: 'Đam mê âm nhạc', icon: '🎧', profiles: filteredExploreProfiles.filter((p: any) => { const v = p.music || p.lifestyle?.music; return v && v !== 'Khác' }) },
-         { id: 'du_lich', title: 'Thích xê dịch', icon: '✈️', profiles: filteredExploreProfiles.filter((p: any) => { const v = p.travel || p.lifestyle?.travel; return v && v !== 'Khác' }) }
+         { id: 'thu_cung', title: 'Yêu thú cưng', icon: '🐶', profiles: filteredExploreProfiles.filter((p: any) => hasExploreValue(p.pet || p.lifestyle?.pet, ['khong nuoi', 'di ung voi dong vat'])) },
+         { id: 'nghe_nhac', title: 'Đam mê âm nhạc', icon: '🎧', profiles: filteredExploreProfiles.filter((p: any) => hasExploreValue(p.music || p.lifestyle?.music)) },
+         { id: 'du_lich', title: 'Thích xê dịch', icon: '✈️', profiles: filteredExploreProfiles.filter((p: any) => hasExploreValue(p.travel || p.lifestyle?.travel)) }
        ]
     },
     { 
@@ -2672,17 +2994,17 @@ export function ExploreView() {
        title: 'Sở thích chung', 
        img: 'https://images.unsplash.com/photo-1514756331096-242fdeb70d4a?auto=format&fit=crop&q=80&w=800',
        subCategories: [
-         { id: 'the_thao', title: 'Yêu thể thao', icon: '⚽', profiles: filteredExploreProfiles.filter((p: any) => { const v = p.sport || p.lifestyle?.sport; return v && v !== 'Khác' && v !== 'Lười vận động' }) },
-         { id: 'am_thuc', title: 'Đam mê ẩm thực', icon: '🍜', profiles: filteredExploreProfiles.filter((p: any) => { const v = p.food || p.lifestyle?.food; return v && v !== 'Khác' }) },
-         { id: 'game', title: 'Mê Game', icon: '🎮', profiles: filteredExploreProfiles.filter((p: any) => { const v = p.game || p.lifestyle?.game; return v && v !== 'Không chơi' && v !== 'Khác' }) },
-         { id: 'sach', title: 'Mọt sách', icon: '📚', profiles: filteredExploreProfiles.filter((p: any) => { const v = p.book || p.lifestyle?.book; return v && v !== 'Khác' }) },
+         { id: 'the_thao', title: 'Yêu thể thao', icon: '⚽', profiles: filteredExploreProfiles.filter((p: any) => hasExploreValue(p.sport || p.lifestyle?.sport, ['luoi van dong']) || hasInterest(p, ['sport', 'the thao', 'gym', 'yoga', 'bong', 'chay'])) },
+         { id: 'am_thuc', title: 'Đam mê ẩm thực', icon: '🍜', profiles: filteredExploreProfiles.filter((p: any) => hasExploreValue(p.food || p.lifestyle?.food) || hasInterest(p, ['food', 'am thuc', 'nau an', 'ca phe'])) },
+         { id: 'game', title: 'Mê Game', icon: '🎮', profiles: filteredExploreProfiles.filter((p: any) => hasExploreValue(p.game || p.lifestyle?.game, ['khong choi']) || hasInterest(p, ['game', 'tro choi'])) },
+         { id: 'sach', title: 'Mọt sách', icon: '📚', profiles: filteredExploreProfiles.filter((p: any) => hasExploreValue(p.book || p.lifestyle?.book) || hasInterest(p, ['book', 'sach', 'doc'])) },
        ]
     },
   ];
 
   if (selectedSubCategory) {
      return (
-       <div className="absolute inset-0 z-50 bg-[#ff9ca0]">
+       <div className="absolute inset-0 z-50 bg-[#eaf4ff]">
          <ProfileSwiper profiles={selectedSubCategory.profiles} title={selectedSubCategory.title} onClose={() => setSelectedSubCategory(null)} />
        </div>
      );
@@ -2690,7 +3012,7 @@ export function ExploreView() {
 
   if (selectedMainCategory) {
      return (
-       <div className="bg-[#ff9ca0] h-full w-full flex flex-col pt-8 overflow-hidden absolute inset-0 z-50">
+       <div className="bg-[#eaf4ff] h-full w-full flex flex-col pt-8 overflow-hidden absolute inset-0 z-50">
           <div className="flex items-center px-4 pb-4 mb-4 border-b border-black/10 shrink-0">
              <button onClick={() => setSelectedMainCategory(null)} className="p-1.5 active:scale-90 transition-transform -ml-2 mr-2">
                 <ArrowLeft className="w-7 h-7 text-black" />
@@ -2707,7 +3029,7 @@ export function ExploreView() {
                        transition={{ delay: idx * 0.05 }}
                        whileTap={{ scale: 0.95 }}
                        onClick={() => setSelectedSubCategory(sub)}
-                       className="bg-[#fff0f1] rounded-[24px] aspect-square flex flex-col items-center justify-center p-4 border border-black/5 shadow-sm cursor-pointer"
+                       className="bg-[#f0f9ff] rounded-[24px] aspect-square flex flex-col items-center justify-center p-4 border border-black/5 shadow-sm cursor-pointer"
                     >
                        <span className="text-[48px] mb-3">{sub.icon}</span>
                         <span className="font-bold text-[15px] text-center text-black px-2">{sub.title}</span>
@@ -2721,7 +3043,7 @@ export function ExploreView() {
   }
 
   return (
-    <div className="bg-[#ff9ca0] h-full flex flex-col p-4 pt-8 overflow-hidden">
+    <div className="bg-[#eaf4ff] h-full flex flex-col p-4 pt-8 overflow-hidden">
        <h1 className="text-[28px] font-bold mb-6 ml-1 mt-4 shrink-0">Khám phá</h1>
        
        <div className="space-y-6 overflow-y-auto pb-24 pr-2 -mr-2">
@@ -2749,11 +3071,17 @@ export function ExploreView() {
 
 // Likes View
 export function LikesView() {
-  const { likedProfiles, savedProfiles, toggleLike, onNavigate, setActiveChatUser } = React.useContext(AppContext);
-  const [activeTab, setActiveTab] = useState<'liked'|'received'|'saved'>('received');
+  const { likedProfiles, toggleLike, onNavigate, setActiveChatUser, myProfile, serverUsers } = React.useContext(AppContext);
+  const [activeTab, setActiveTab] = useState<'liked'|'received'|'friends'|'moments'>('received');
   const [selectedProfile, setSelectedProfile] = useState<any>(null);
   const [showMatch, setShowMatch] = useState(false);
   const [receivedLikes, setReceivedLikes] = useState<any[]>([]);
+  const [friendRequests, setFriendRequests] = useState<any[]>([]);
+  const [ownMoments, setOwnMoments] = useState<any[]>([]);
+  const [selectedOwnMoment, setSelectedOwnMoment] = useState<any>(null);
+  const [momentReactions, setMomentReactions] = useState<any[]>([]);
+
+
 
   useEffect(() => {
      let active = true;
@@ -2761,7 +3089,7 @@ export function LikesView() {
         const userId = sessionStorage.getItem('user_id');
         if (userId) {
            try {
-              const res = await fetch(`/api/likes/${userId}`);
+              const res = await apiFetch(`/api/likes/${userId}`);
               const data = await res.json();
               if (data.success && data.data && active) {
                   const mapped = data.data.map((m: any) => {
@@ -2775,6 +3103,15 @@ export function LikesView() {
                          name: profileData.name || 'Người dùng',
                          time: 'Vừa xong',
                          count: profileData.location || 'Gần bạn',
+                         dob: profileData.dob || '2001-01-01',
+                         zodiac: profileData.zodiac || 'Song Tử',
+                         food: profileData.food || profileData.lifestyle?.food,
+                         travel: profileData.travel || profileData.lifestyle?.travel,
+                         sport: profileData.sport || profileData.lifestyle?.sport,
+                         music: profileData.music || profileData.lifestyle?.music,
+                         need: profileData.need || profileData.intent,
+                         communicationStyle: profileData.communicationStyle,
+                         pet: profileData.pet || profileData.lifestyle?.pet,
                          img: (() => {
                             const hasCustom = profileData.images && profileData.images.length > 0 && !profileData.images[0].includes('photo-1549880338-65ddcdfd017b');
                             return hasCustom ? profileData.images[0] : getUniqueUnsplashPortraits(profileData.gender || 'Nữ', m.user_id)[0];
@@ -2790,10 +3127,39 @@ export function LikesView() {
      return () => { active = false; };
   }, []);
 
+  useEffect(() => {
+    let active = true;
+    const userId = sessionStorage.getItem('user_id');
+    if (!userId) return () => { active = false; };
+    Promise.all([
+      apiFetch('/api/friend-requests/incoming').then(response => response.json()),
+      apiFetch('/api/moments/mine').then(response => response.json()),
+    ]).then(([requestResult, momentResult]) => {
+      if (!active) return;
+      if (Array.isArray(requestResult?.data)) {
+        setFriendRequests(requestResult.data.map((request: any) => {
+          const profile = typeof request.profile_data === 'string' ? JSON.parse(request.profile_data) : (request.profile_data || {});
+          return {
+            id: Number(request.user_id), requestId: Number(request.request_id), name: profile.name || 'Người dùng mới',
+            time: request.created_at ? new Date(request.created_at).toLocaleDateString() : 'Vừa xong',
+            count: profile.location || profile.hometown || 'Gần bạn', dob: profile.dob || '2001-01-01', zodiac: profile.zodiac || '',
+            food: profile.food || profile.lifestyle?.food, travel: profile.travel || profile.lifestyle?.travel,
+            sport: profile.sport || profile.lifestyle?.sport, music: profile.music || profile.lifestyle?.music,
+            need: profile.need || profile.intent || profile.intents, communicationStyle: profile.communicationStyle,
+            pet: profile.pet || profile.lifestyle?.pet, img: profile.images?.[0] || request.user_avatar || '', ...profile,
+          };
+        }));
+      }
+      if (Array.isArray(momentResult?.data)) setOwnMoments(momentResult.data);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []);
+
   // Map contextual profiles to the list format
   const mappedLiked = (likedProfiles || [])
     .filter(p => p && p.id)
     .map(p => ({
+      ...p,
       id: p.id,
       name: p.name || 'Người dùng mới',
       time: 'Vừa xong',
@@ -2801,20 +3167,63 @@ export function LikesView() {
       img: p.images && p.images.length > 0 ? p.images[0] : (p.img || 'https://images.unsplash.com/photo-1549880338-65ddcdfd017b?auto=format&fit=crop&q=80&w=800')
     }));
 
-  const mappedSaved = (savedProfiles || [])
-    .filter(p => p && p.id)
-    .map(p => ({
-      id: p.id,
-      name: p.name || 'Người dùng mới',
-      time: 'Vừa xong',
-      count: p.distance || 'Gần bạn',
-      img: p.images && p.images.length > 0 ? p.images[0] : (p.img || 'https://images.unsplash.com/photo-1549880338-65ddcdfd017b?auto=format&fit=crop&q=80&w=800')
-    }));
+  const mappedFriends = friendRequests.filter(profile => profile && profile.id).map(profile => ({ ...profile, img: profile.img || profile.images?.[0] || "" }));
 
-  const displayList = activeTab === 'liked' ? mappedLiked : activeTab === 'saved' ? mappedSaved : receivedLikes;
+  // Enrich profile with 4-pillar compatibility calculation
+  const enrichWithCompatibility = (profile: any) => {
+    const fullServerUser = serverUsers?.find(u => u.id === profile.id);
+    const partnerData = {
+      ...profile,
+      ...(fullServerUser || {}),
+      dob: profile.dob || fullServerUser?.dob || '2001-01-01',
+      zodiac: profile.zodiac || fullServerUser?.zodiac || 'Kim Ngưu',
+      food: profile.food || fullServerUser?.food || 'Cà phê',
+      travel: profile.travel || fullServerUser?.travel || 'Đà Lạt',
+      sport: profile.sport || fullServerUser?.sport || 'Gym',
+      music: profile.music || fullServerUser?.music || 'V-pop',
+      need: profile.need || fullServerUser?.need || 'Tìm người yêu',
+      communicationStyle: profile.communicationStyle || fullServerUser?.communicationStyle || 'Nhắn tin nhiều hơn',
+      pet: profile.pet || fullServerUser?.pet || 'Yêu thích'
+    };
+
+    const comp = calculateFullCompatibility(myProfile, partnerData);
+    return {
+      ...profile,
+      partnerData,
+      compatibilityScore: comp.totalScore,
+      compatibilityBreakdown: comp.breakdown,
+      compatibilitySummary: comp.summaryText
+    };
+  };
+
+  const rawList = activeTab === 'liked' ? mappedLiked : activeTab === 'friends' ? mappedFriends : activeTab === 'received' ? receivedLikes : [];
+
+  // Compute percentage and sort descending by compatibilityScore (highest at the top)
+  const displayList = rawList
+    .map(enrichWithCompatibility)
+    .sort((a, b) => (b.compatibilityScore || 0) - (a.compatibilityScore || 0));
 
   const handleProfileClick = (like: any) => {
     setSelectedProfile(like);
+  };
+
+  const respondFriendRequest = async (profile: any, response: 'accept' | 'reject') => {
+    try {
+      const resultResponse = await apiFetch(`/api/friend-requests/${profile.requestId}/respond`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ response })
+      });
+      const result = await resultResponse.json();
+      if (!resultResponse.ok) throw new Error(result.error || 'Không cập nhật được lời mời kết bạn.');
+      setFriendRequests(previous => previous.filter(request => request.requestId !== profile.requestId));
+      if (response === 'accept') {
+        setSelectedProfile({ ...profile, matchId: result.match_id });
+        setShowMatch(true);
+      }
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : 'Không cập nhật được lời mời kết bạn.');
+    }
   };
 
   const closeMatch = () => {
@@ -2829,41 +3238,49 @@ export function LikesView() {
     }
   };
 
+  const openMomentReactions = async (moment: any) => {
+    setSelectedOwnMoment(moment);
+    setMomentReactions([]);
+    try {
+      const response = await apiFetch(`/api/moments/${moment.id}/reactions`);
+      const result = await response.json();
+      if (response.ok && Array.isArray(result.data)) setMomentReactions(result.data);
+    } catch { setMomentReactions([]); }
+  };
+
   return (
-    <div className="bg-[#ff9ca0] min-h-full flex flex-col relative overflow-hidden">
+    <div className="bg-[#eaf4ff] min-h-full flex flex-col relative overflow-hidden">
       <h1 className="text-[28px] font-bold p-6 pt-10 pb-4 shrink-0">Hoạt động</h1>
       
-      <div className="flex px-4 border-b border-black/10 shrink-0 gap-2">
-        <button 
-          onClick={() => setActiveTab('received')}
-          className="flex-1 pb-3 text-[16px] text-center relative outline-none"
-        >
-          <span className={`${activeTab === 'received' ? 'font-bold text-black' : 'text-black/60'} transition-colors relative z-10`}>Lượt thích</span>
-          {activeTab === 'received' && (
-             <motion.div layoutId="likesTabOutline" className="absolute bottom-[-1px] left-0 right-0 h-[2.5px] bg-black z-0" />
-          )}
-        </button>
-        <button 
-          onClick={() => setActiveTab('liked')}
-          className="flex-1 pb-3 text-[16px] text-center relative outline-none"
-        >
-          <span className={`${activeTab === 'liked' ? 'font-bold text-black' : 'text-black/60'} transition-colors relative z-10`}>Đã thích</span>
-          {activeTab === 'liked' && (
-             <motion.div layoutId="likesTabOutline" className="absolute bottom-[-1px] left-0 right-0 h-[2.5px] bg-black z-0" />
-          )}
-        </button>
-        <button 
-          onClick={() => setActiveTab('saved')}
-          className="flex-1 pb-3 text-[16px] text-center relative outline-none"
-        >
-          <span className={`${activeTab === 'saved' ? 'font-bold text-black' : 'text-black/60'} transition-colors relative z-10`}>Đã lưu</span>
-          {activeTab === 'saved' && (
-             <motion.div layoutId="likesTabOutline" className="absolute bottom-[-1px] left-0 right-0 h-[2.5px] bg-black z-0" />
-          )}
-        </button>
+      <div className="flex px-3 border-b border-black/10 shrink-0 gap-1">
+        {([
+          ['received', 'Lượt thích'],
+          ['liked', 'Đã thích'],
+          ['friends', 'Bạn mới'],
+          ['moments', 'Khoảnh khắc'],
+        ] as const).map(([tab, label]) => (
+          <button key={tab} onClick={() => setActiveTab(tab)} className="flex-1 pb-3 pt-1 text-[16px] font-semibold text-center relative outline-none">
+            <span className={activeTab === tab ? 'font-extrabold text-sky-800' : 'text-black/60'}>{label}</span>
+            {activeTab === tab && <motion.div layoutId="likesTabOutline" className="absolute bottom-[-1px] left-0 right-0 h-[3px] bg-sky-600 z-0 rounded-full" />}
+          </button>
+        ))}
       </div>
 
       <div className="flex-1 relative pb-24 overflow-y-auto w-full">
+         {activeTab === 'moments' ? (
+           <div className="grid grid-cols-2 gap-3 p-4 max-w-sm mx-auto w-full">
+             {ownMoments.map(moment => (
+               <button key={moment.id} onClick={() => openMomentReactions(moment)} className="overflow-hidden rounded-2xl bg-white text-left shadow-sm border border-sky-100">
+                 <img src={moment.imageUrl} alt="Khoảnh khắc của bạn" className="w-full aspect-square object-cover" />
+                 <div className="p-2.5">
+                   <p className="text-xs font-semibold text-slate-800 line-clamp-2">{moment.caption || 'Khoảnh khắc'}</p>
+                   <p className="mt-1 text-[11px] font-bold text-sky-700">{Object.values(moment.reactions || {}).reduce((sum: number, count: any) => sum + Number(count || 0), 0)} biểu cảm ? Xem ai đã thích?</p>
+                 </div>
+               </button>
+             ))}
+             {ownMoments.length === 0 && <p className="col-span-2 mt-10 text-center text-sm font-semibold text-slate-500">Bạn chưa đăng khoảnh khắc nào.</p>}
+           </div>
+         ) : (
          <AnimatePresence mode="wait">
             <motion.div
                key={activeTab}
@@ -2880,36 +3297,66 @@ export function LikesView() {
                    initial={{ opacity: 0, y: 10 }}
                    animate={{ opacity: 1, y: 0 }}
                    transition={{ delay: i * 0.05 }}
-                   className={`bg-white rounded-[16px] p-3 mx-1 flex items-center justify-between shadow-sm active:scale-95 transition-transform group border border-white hover:border-black/5 ${activeTab === 'received' ? 'cursor-pointer' : ''}`}
+                   className={`bg-white rounded-[16px] p-3 mx-1 flex items-center justify-between shadow-sm active:scale-95 transition-transform group border border-white hover:border-black/5 cursor-pointer`}
                  >
                    <div className="flex items-center gap-4">
                      <img src={like.img} className="w-[52px] h-[52px] rounded-full object-cover group-hover:scale-105 transition-transform" />
                      <div>
-                       <p className="font-bold text-[16px] text-black">{like.name}</p>
+                       <div className="flex items-center gap-1.5">
+                         <p className="font-bold text-[16px] text-black">{like.name}</p>
+                         {like.zodiac && (
+                           <span className="text-[11px] font-medium text-sky-800 bg-sky-50 px-1.5 py-0.5 rounded">
+                             {like.zodiac}
+                           </span>
+                         )}
+                       </div>
                        <p className="text-[13px] text-gray-500 font-medium leading-tight">{like.time}</p>
                        {activeTab === 'received' ? 
                          <p className="text-[13px] text-black font-medium mt-1">Đã thích bạn</p> :
                          <div className="flex items-center gap-1.5 mt-1.5 opacity-80">
-                           {activeTab === 'saved' ? <Bookmark className="w-[14px] h-[14px] stroke-[2.5] text-yellow-500" /> : <Heart className="w-[14px] h-[14px] stroke-[2.5] text-[#ff2d55]" />}
-                           <span className={`text-[13px] font-bold ${activeTab === 'saved' ? 'text-yellow-600' : 'text-[#ff2d55]'}`}>{like.count}</span>
+                           {activeTab === 'friends' ? <LucideIcons.UserPlus className="w-[14px] h-[14px] stroke-[2.5] text-sky-600" /> : <Heart className="w-[14px] h-[14px] stroke-[2.5] text-[#ff2d55]" />}
+                           <span className={`text-[13px] font-bold ${activeTab === 'friends' ? 'text-sky-600' : 'text-[#ff2d55]'}`}>{like.count}</span>
                          </div>
                        }
                      </div>
                    </div>
-                   {activeTab === 'received' && (
-                      <div className="w-10 h-10 rounded-full bg-[#ff9ca0]/30 flex justify-center items-center mr-2">
-                         <Heart className="w-5 h-5 text-[#ff2d55] fill-[#ff2d55]" />
-                      </div>
-                   )}
+
+                   <div className="flex items-center gap-2.5">
+                     <div className="flex flex-col items-end gap-1 shrink-0">
+                        <div className={`px-2.5 py-1 rounded-full text-xs font-black text-white flex items-center gap-1 shadow-xs ${
+                           (like.compatibilityScore || 80) >= 90 ? 'bg-gradient-to-r from-emerald-500 to-teal-600' :
+                           (like.compatibilityScore || 80) >= 80 ? 'bg-gradient-to-r from-sky-500 to-blue-600' :
+                           'bg-gradient-to-r from-amber-500 to-orange-500'
+                        }`}>
+                           <Zap className="w-3.5 h-3.5 fill-current" />
+                           <span>{like.compatibilityScore || 80}% hợp</span>
+                        </div>
+                        <span className="text-[10px] text-gray-500 font-semibold max-w-[100px] text-right truncate">
+                           {like.compatibilityBreakdown?.lunar?.relation?.split('(')[0] || 'Tương hợp cao'}
+                        </span>
+                     </div>
+                     {activeTab === 'received' && (
+                        <div className="w-9 h-9 rounded-full bg-[#eaf4ff]/20 flex justify-center items-center shrink-0">
+                           <Heart className="w-4 h-4 text-[#ff2d55] fill-[#ff2d55]" />
+                        </div>
+                     )}
+                     {activeTab === 'friends' && (
+                       <div className="flex items-center gap-1">
+                         <button title="Đồng ý kết bạn" onClick={event => { event.stopPropagation(); respondFriendRequest(like, 'accept'); }} className="rounded-full bg-emerald-500 p-2 text-white shadow-sm active:scale-90"><Check className="h-4 w-4 stroke-[3]" /></button>
+                         <button title="Từ chối" onClick={event => { event.stopPropagation(); respondFriendRequest(like, 'reject'); }} className="rounded-full bg-rose-500 p-2 text-white shadow-sm active:scale-90"><X className="h-4 w-4 stroke-[3]" /></button>
+                       </div>
+                     )}
+                   </div>
                  </motion.div>
                ))}
                {displayList.length === 0 && (
                  <div className="text-center text-black/60 font-medium mt-10">
-                   {activeTab === 'saved' ? 'Chưa có hồ sơ nào được lưu.' : activeTab === 'liked' ? 'Bạn chưa thích ai.' : 'Chưa có lượt thích nào.'}
+                   {activeTab === 'friends' ? 'Chưa có hồ sơ nào được lưu.' : activeTab === 'liked' ? 'Bạn chưa thích ai.' : 'Chưa có lượt thích nào.'}
                  </div>
                )}
             </motion.div>
          </AnimatePresence>
+         )}
       </div>
 
       {/* Received Profile Viewer Overlay */}
@@ -2919,19 +3366,122 @@ export function LikesView() {
              initial={{ opacity: 0, y: 200 }}
              animate={{ opacity: 1, y: 0 }}
              exit={{ opacity: 0, y: 200 }}
-             className="absolute inset-0 z-[100] bg-[#fff0f1] flex flex-col px-5 pt-12 pb-24 overflow-hidden"
+             className="absolute inset-0 z-[100] bg-[#f0f9ff] flex flex-col px-4 pt-10 pb-20 overflow-hidden"
            >
-              <div className="w-full flex-1 relative bg-black rounded-[24px] shadow-xl overflow-hidden border border-black/5 flex flex-col mb-4 max-h-[80vh]">
-                <img src={selectedProfile.img} alt="Profile" className="w-full h-full object-cover" />
-                <div className="absolute inset-x-0 bottom-0 pt-24 pb-6 px-5 bg-gradient-to-t from-black/80 via-black/40 to-transparent pointer-events-none flex flex-col justify-end">
-                   <h2 className="text-[32px] font-bold mb-0.5 tracking-tight text-white">{selectedProfile.name}</h2>
-                   <div className="mt-3 bg-black/30 backdrop-blur-md px-4 py-2.5 rounded-xl border border-white/10 shadow-sm text-[14px] text-white">
-                      <span className="font-bold text-[#ff9ca0]">
-                         {activeTab === 'received' ? `Người này đã thích bạn ${selectedProfile.time}` : 
-                          activeTab === 'liked' ? `Bạn đã thích người này ${selectedProfile.time}` : 
-                          `Bạn đã lưu hồ sơ người này ${selectedProfile.time}`}
-                      </span>
-                   </div>
+              <div className="w-full flex-1 relative bg-white rounded-[24px] shadow-xl overflow-hidden border border-black/10 flex flex-col mb-4 overflow-y-auto">
+                <div className="relative w-full h-[280px] shrink-0 bg-black">
+                  <img src={selectedProfile.img} alt="Profile" className="w-full h-full object-cover" />
+                  <div className="absolute inset-x-0 bottom-0 pt-20 pb-4 px-5 bg-gradient-to-t from-black/90 via-black/40 to-transparent pointer-events-none flex flex-col justify-end">
+                     <div className="flex items-center justify-between">
+                       <h2 className="text-[28px] font-extrabold text-white tracking-tight">{selectedProfile.name}</h2>
+                       <div className="px-3 py-1 rounded-full bg-emerald-500 text-white font-black text-sm flex items-center gap-1 shadow-md">
+                         <Zap className="w-4 h-4 fill-current" />
+                         <span>{selectedProfile.compatibilityScore || 85}% tương thích</span>
+                       </div>
+                     </div>
+                     <p className="text-xs text-sky-200 mt-0.5">{selectedProfile.count || 'Gần bạn'} • {selectedProfile.time || 'Vừa xong'}</p>
+                  </div>
+                </div>
+
+                {/* 4-Pillar Compatibility Breakdown Section */}
+                <div className="p-5 space-y-4">
+                  <div className="bg-sky-50 rounded-2xl p-4 border border-sky-100">
+                    <div className="flex items-center justify-between mb-1.5">
+                      <span className="text-xs font-bold text-sky-900 uppercase tracking-wider">Đánh giá hòa hợp 4 trụ cột</span>
+                      <span className="text-xs font-black text-sky-700">{selectedProfile.compatibilityScore || 85}/100%</span>
+                    </div>
+                    <p className="text-xs text-sky-800 font-medium leading-relaxed">
+                      {selectedProfile.compatibilitySummary || 'Hai bạn có tần số rung động và lối sống rất đồng điệu!'}
+                    </p>
+                  </div>
+
+                  {selectedProfile.compatibilityBreakdown && (
+                    <div className="space-y-3">
+                      {/* Trụ cột 1: Sở thích */}
+                      <div className="bg-white rounded-xl p-3 border border-gray-100 shadow-2xs">
+                        <div className="flex items-center justify-between text-xs mb-1">
+                          <span className="font-bold text-gray-800 flex items-center gap-1.5">
+                            <span>🎨</span> Sở thích chung (25%)
+                          </span>
+                          <span className="font-extrabold text-blue-600">
+                            {selectedProfile.compatibilityBreakdown.interests.score}/25đ ({selectedProfile.compatibilityBreakdown.interests.percent}%)
+                          </span>
+                        </div>
+                        <div className="w-full bg-gray-100 h-2 rounded-full overflow-hidden mb-1.5">
+                          <div 
+                            className="bg-blue-500 h-full rounded-full transition-all" 
+                            style={{ width: `${selectedProfile.compatibilityBreakdown.interests.percent}%` }}
+                          />
+                        </div>
+                        <p className="text-[11px] text-gray-500 leading-tight">
+                          {selectedProfile.compatibilityBreakdown.interests.details}
+                        </p>
+                      </div>
+
+                      {/* Trụ cột 2: Phong cách sống */}
+                      <div className="bg-white rounded-xl p-3 border border-gray-100 shadow-2xs">
+                        <div className="flex items-center justify-between text-xs mb-1">
+                          <span className="font-bold text-gray-800 flex items-center gap-1.5">
+                            <span>🌿</span> Phong cách sống (25%)
+                          </span>
+                          <span className="font-extrabold text-emerald-600">
+                            {selectedProfile.compatibilityBreakdown.lifestyle.score}/25đ ({selectedProfile.compatibilityBreakdown.lifestyle.percent}%)
+                          </span>
+                        </div>
+                        <div className="w-full bg-gray-100 h-2 rounded-full overflow-hidden mb-1.5">
+                          <div 
+                            className="bg-emerald-500 h-full rounded-full transition-all" 
+                            style={{ width: `${selectedProfile.compatibilityBreakdown.lifestyle.percent}%` }}
+                          />
+                        </div>
+                        <p className="text-[11px] text-gray-500 leading-tight">
+                          {selectedProfile.compatibilityBreakdown.lifestyle.details}
+                        </p>
+                      </div>
+
+                      {/* Trụ cột 3: 12 Con Giáp */}
+                      <div className="bg-white rounded-xl p-3 border border-gray-100 shadow-2xs">
+                        <div className="flex items-center justify-between text-xs mb-1">
+                          <span className="font-bold text-gray-800 flex items-center gap-1.5">
+                            <span>🐾</span> 12 Con Giáp (25%)
+                          </span>
+                          <span className="font-extrabold text-amber-600">
+                            {selectedProfile.compatibilityBreakdown.lunar.score}/25đ ({selectedProfile.compatibilityBreakdown.lunar.percent}%)
+                          </span>
+                        </div>
+                        <div className="w-full bg-gray-100 h-2 rounded-full overflow-hidden mb-1.5">
+                          <div 
+                            className="bg-amber-500 h-full rounded-full transition-all" 
+                            style={{ width: `${selectedProfile.compatibilityBreakdown.lunar.percent}%` }}
+                          />
+                        </div>
+                        <p className="text-[11px] text-gray-500 leading-tight">
+                          {selectedProfile.compatibilityBreakdown.lunar.animalA} & {selectedProfile.compatibilityBreakdown.lunar.animalB} • {selectedProfile.compatibilityBreakdown.lunar.relation}
+                        </p>
+                      </div>
+
+                      {/* Trụ cột 4: Chiêm tinh */}
+                      <div className="bg-white rounded-xl p-3 border border-gray-100 shadow-2xs">
+                        <div className="flex items-center justify-between text-xs mb-1">
+                          <span className="font-bold text-gray-800 flex items-center gap-1.5">
+                            <span>✨</span> Chiêm tinh hoàng đạo (25%)
+                          </span>
+                          <span className="font-extrabold text-purple-600">
+                            {selectedProfile.compatibilityBreakdown.zodiac.score}/25đ ({selectedProfile.compatibilityBreakdown.zodiac.percent}%)
+                          </span>
+                        </div>
+                        <div className="w-full bg-gray-100 h-2 rounded-full overflow-hidden mb-1.5">
+                          <div 
+                            className="bg-purple-500 h-full rounded-full transition-all" 
+                            style={{ width: `${selectedProfile.compatibilityBreakdown.zodiac.percent}%` }}
+                          />
+                        </div>
+                        <p className="text-[11px] text-gray-500 leading-tight">
+                          {selectedProfile.compatibilityBreakdown.zodiac.signA} & {selectedProfile.compatibilityBreakdown.zodiac.signB} • {selectedProfile.compatibilityBreakdown.zodiac.relation}
+                        </p>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
               <div className="flex justify-center items-center gap-6 z-50 shrink-0 h-[80px]">
@@ -2948,12 +3498,12 @@ export function LikesView() {
                       <span className="text-[10px] font-bold text-gray-500 uppercase">Bỏ thích</span>
                     </button>
                  )}
-                 {activeTab !== 'liked' && (
+                 {activeTab !== 'liked' && activeTab !== 'friends' && (
                     <button onClick={() => {
                         // Nếu ở tab "Lượt thích" (received) thì hành động này là "Chấp nhận" => tạo match_id để mở chat
                         const myId = sessionStorage.getItem('user_id');
                         if (activeTab === 'received' && myId) {
-                            fetch('/api/matches/swipe', {
+                            apiFetch('/api/matches/swipe', {
                                 method: 'POST',
                                 headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ user_id: parseInt(myId), target_user_id: selectedProfile.id, action: 'LIKE' })
@@ -2999,7 +3549,7 @@ export function LikesView() {
             initial={{ opacity: 0, scale: 1.1 }}
             animate={{ opacity: 1, scale: 1 }}
             exit={{ opacity: 0 }}
-            className="absolute inset-0 z-[110] bg-[#ff9ca0] flex flex-col items-center justify-center p-6 text-black"
+            className="absolute inset-0 z-[110] bg-[#eaf4ff] flex flex-col items-center justify-center p-6 text-black"
           >
             <h2 className="text-[40px] font-bold mb-10 italic tracking-tighter text-[#ff2d55] drop-shadow-sm">It's a Match!</h2>
             <div className="flex gap-4 mb-16 relative">
@@ -3027,19 +3577,45 @@ export function LikesView() {
           </motion.div>
         )}
       </AnimatePresence>
+      {selectedOwnMoment && (
+        <div className="absolute inset-0 z-[120] bg-slate-950/70 flex items-center justify-center p-4">
+          <div className="w-full max-w-sm max-h-[90%] overflow-y-auto rounded-3xl bg-white shadow-2xl">
+            <div className="flex items-center justify-between p-4">
+              <h2 className="font-extrabold text-slate-900">Ai đã biểu cảm?</h2>
+              <button onClick={() => setSelectedOwnMoment(null)} className="rounded-full bg-slate-100 p-2 text-slate-700"><X className="h-5 w-5" /></button>
+            </div>
+            <img src={selectedOwnMoment.imageUrl} alt="Khoảnh khắc của bạn" className="w-full max-h-80 object-cover" />
+            {selectedOwnMoment.caption && <p className="px-4 pt-3 text-sm font-medium text-slate-800">{selectedOwnMoment.caption}</p>}
+            <div className="space-y-2 p-4">
+              {momentReactions.map((reaction, index) => (
+                <div key={String(reaction.userId) + '-' + index} className="flex items-center gap-3 rounded-xl bg-sky-50 p-2.5">
+                  <img src={reaction.userAvatar || ('https://ui-avatars.com/api/?name=' + encodeURIComponent(reaction.userName))} alt="" className="h-10 w-10 rounded-full object-cover" />
+                  <span className="flex-1 text-sm font-bold text-slate-800">{reaction.userName}</span>
+                  <span className="text-xl">{{ heart: '❤️', smile: '😄', surprised: '😮', sad: '😢' }[reaction.reaction]}</span>
+                </div>
+              ))}
+              {momentReactions.length === 0 && <p className="py-5 text-center text-sm text-slate-500">Chưa có ai biểu cảm.</p>}
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }
 
 // Chat View
 export function ChatView() {
-  const { activeChatUser, setActiveChatUser, likedProfiles, serverUsers } = React.useContext(AppContext);
+  const { activeChatUser, setActiveChatUser, likedProfiles, serverUsers, updateMyProfile, myProfile } = React.useContext(AppContext);
   const [activeChat, setActiveChat] = useState<{id?: number, matchId?: number, name: string, img: string} | null>(activeChatUser || null);
   const [messages, setMessages] = useState<any[]>([]);
+  const [hasOlderMessages, setHasOlderMessages] = useState(false);
+  const [isLoadingOlderMessages, setIsLoadingOlderMessages] = useState(false);
   const [inputText, setInputText] = useState('');
   const [showInfo, setShowInfo] = useState(false);
   const [showInfoProfile, setShowInfoProfile] = useState(false);
   const [isTyping, setIsTyping] = useState(false);
+  const [isPremiumModalOpen, setIsPremiumModalOpen] = useState(false);
   
   const partnerProfile = React.useMemo(() => {
      if (!activeChat) return null;
@@ -3047,13 +3623,23 @@ export function ChatView() {
      if (inServer) return inServer;
      const inLiked = likedProfiles.find((u:any) => u.id === activeChat.id || u.id === (activeChat as any).userId);
      if (inLiked) return inLiked;
-     return { id: activeChat.id || 9999, ...activeChat, name: activeChat.name, images: (activeChat as any).images || [activeChat.img], bio: activeChat.name === 'Darling' ? 'Chuyên gia tư vấn hẹn hò AI' : ((activeChat as any).bio || 'Người dùng Darling'), location: (activeChat as any).location || 'Hà Nội' };
+     const isAi = activeChat.name === 'Cupid AI' || activeChat.name === 'Darling';
+     return { 
+       id: activeChat.id || 9999, 
+       ...activeChat, 
+       name: activeChat.name, 
+       images: (activeChat as any).images || [activeChat.img], 
+       bio: isAi ? 'Cupid AI - Chuyên gia tư vấn tình cảm, Tarot & Chiêm tinh học' : ((activeChat as any).bio || 'Người dùng'), 
+       location: (activeChat as any).location || 'Hà Nội' 
+     };
   }, [activeChat, serverUsers, likedProfiles]);
   
   // Custom states
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [chatTheme, setChatTheme] = useState('#ff2d55');
   const [notificationsEnabled, setNotificationsEnabled] = useState(true);
+  const notificationsEnabledRef = useRef(true);
+  useEffect(() => { notificationsEnabledRef.current = notificationsEnabled; }, [notificationsEnabled]);
   const [showMedia, setShowMedia] = useState(false);
 
   // Recording
@@ -3066,10 +3652,14 @@ export function ChatView() {
   const [alertMsg, setAlertMsg] = useState<string | null>(null);
   const [notification, setNotification] = useState<{title: string, text: string} | null>(null);
 
-  const emojis = ['😀','😂','🥰','😍','😎','😢','😡','👍','❤️','🔥','✨','🎉','🤔','😅','🙌','👏'];
+  const emojis = ['😀','😃','😄','😁','😆','😅','😂','🤣','🥹','😊','😇','🙂','🙃','😉','😍','🥰','😘','😗','😙','😚','🤗','🤭','🫢','🤔','🫡','😎','🥳','😭','😢','😤','😡','🤯','🥺','😴','🤒','👋','🤝','🙏','👏','🙌','👍','👎','👌','🫶','❤️','🧡','💛','💚','💙','💜','🤍','🖤','💔','💕','💞','💘','💖','💗','💓','💝','💌','💋','🔥','✨','🌟','🎉','🎊','🌹','🌷','🍀','☀️','🌙','☕','🍰','🎵','💯'];
   
   const endOfMessagesRef = useRef<HTMLDivElement>(null);
+  const messagesScrollRef = useRef<HTMLDivElement>(null);
+  const pendingScrollCorrectionRef = useRef<{ height: number; top: number } | null>(null);
+  const followMessagesRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const lastMessageIdRef = useRef(0);
 
   const playBlingSound = () => {
     try {
@@ -3096,15 +3686,22 @@ export function ChatView() {
     setTimeout(() => setAlertMsg(null), 3000);
   };
 
-  const canChat = activeChat?.name === 'Darling' || !!activeChat?.matchId;
+  const isAiChat = activeChat?.name === 'Cupid AI' || activeChat?.name === 'Darling';
+  const canChat = isAiChat || !!activeChat?.matchId;
 
   useEffect(() => {
     let interval: any;
     if (activeChat) {
+      let hasInitialSnapshot = false;
+      let isFetchingMessages = false;
+      lastMessageIdRef.current = 0;
+      setHasOlderMessages(false);
       const fetchMessages = () => {
-         if (activeChat.matchId && activeChat.name !== 'Darling') {
+         if (activeChat.matchId && !isAiChat && !isFetchingMessages) {
+           isFetchingMessages = true;
            const myId = sessionStorage.getItem('user_id');
-           fetch(`/api/messages/${activeChat.matchId}?user_id=${myId}`)
+           const cursor = hasInitialSnapshot ? `&after_id=${lastMessageIdRef.current}` : '';
+           apiFetch(`/api/messages/${activeChat.matchId}?user_id=${myId}${cursor}`)
              .then(res => res.json())
              .then(data => {
                 if (data.success && Array.isArray(data.data)) {
@@ -3117,32 +3714,41 @@ export function ChatView() {
                        time: new Date(m.created_at || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
                     }));
                     
-                    setMessages(prev => {
-                       if (prev.length > 0 && newMessages.length > prev.length) {
-                          const lastMsg = newMessages[newMessages.length - 1];
-                          if (lastMsg.sender === 'them') {
-                             try {
-                               const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-                               const osc = ctx.createOscillator();
-                               const gainNode = ctx.createGain();
-                               osc.type = 'sine';
-                               osc.frequency.setValueAtTime(880, ctx.currentTime);
-                               osc.frequency.exponentialRampToValueAtTime(440, ctx.currentTime + 0.1);
-                               gainNode.gain.setValueAtTime(0, ctx.currentTime);
-                               gainNode.gain.linearRampToValueAtTime(0.1, ctx.currentTime + 0.05);
-                               gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
-                               osc.connect(gainNode);
-                               gainNode.connect(ctx.destination);
-                               osc.start();
-                               osc.stop(ctx.currentTime + 0.3);
-                             } catch(e) {}
-                          }
+                     const isInitialLoad = !hasInitialSnapshot;
+                     const arrived = isInitialLoad ? [] : newMessages.filter((message: any) => message.sender === 'them');
+                     hasInitialSnapshot = true;
+                     if (newMessages.length) {
+                       lastMessageIdRef.current = Math.max(lastMessageIdRef.current, ...newMessages.map((message: any) => Number(message.id) || 0));
+                     }
+                     if (arrived.length && notificationsEnabledRef.current) {
+                       const latest = arrived[arrived.length - 1];
+                       playBlingSound();
+                       setNotification({ title: activeChat.name, text: latest.text || 'Đã gửi một nội dung mới' });
+                       window.setTimeout(() => setNotification(null), 3500);
+                       if (document.hidden && 'Notification' in window && Notification.permission === 'granted') {
+                         new Notification(activeChat.name, { body: latest.text || 'Đã gửi một nội dung mới', icon: activeChat.img });
                        }
-                       return newMessages;
-                    });
+                     }
+                      if (isInitialLoad) {
+                        setHasOlderMessages(newMessages.length === 100);
+                        setMessages(newMessages);
+                      } else if (newMessages.length) {
+                        setMessages(previous => {
+                          const merged = [...previous];
+                          newMessages.forEach((message: any) => {
+                            const optimisticIndex = message.sender === 'me'
+                              ? merged.findIndex((existing: any) => existing.pending && existing.sender === 'me' && existing.text === message.text)
+                              : -1;
+                            if (optimisticIndex >= 0) merged[optimisticIndex] = message;
+                            else if (!merged.some((existing: any) => String(existing.id) === String(message.id))) merged.push(message);
+                          });
+                          return merged.slice(-300);
+                        });
+                      }
                 }
              })
-             .catch(() => {});
+              .catch(() => {})
+              .finally(() => { isFetchingMessages = false; });
          }
       };
 
@@ -3151,12 +3757,32 @@ export function ChatView() {
         if (storedTheme) setChatTheme(storedTheme);
         
         fetchMessages();
-        interval = setInterval(fetchMessages, 2500);
+        interval = setInterval(fetchMessages, 1200);
         
-        if (!activeChat.matchId || activeChat.name === 'Darling') {
-            const stored = localStorage.getItem('ais_chat_' + activeChat.name);
-            if (stored) setMessages(JSON.parse(stored));
-            else setMessages([]);
+        if (!activeChat.matchId || activeChat.name === 'Cupid AI' || activeChat.name === 'Darling') {
+            const raw = localStorage.getItem('ais_chat_' + activeChat.name) || (activeChat.name === 'Cupid AI' ? localStorage.getItem('cupid_ai_messages') : null);
+            if (raw) {
+              try {
+                const parsed = JSON.parse(raw);
+                setMessages(parsed);
+              } catch(e) {
+                setMessages([]);
+              }
+            } else if (activeChat.name === 'Cupid AI') {
+              const defaultGreeting = [
+                {
+                  id: 1,
+                  sender: 'them',
+                  text: `Chào bạn, mình là **Cupid AI**! 🕊️💖\n\nLà người bạn đồng hành thấu cảm và tinh tế, mình ở đây để lắng nghe và chia sẻ cùng bạn mọi câu chuyện tình cảm, tâm lý giao tiếp lứa đôi, cũng như trải bài Tarot, Chiêm tinh 12 cung hoàng đạo và Tử vi 12 con giáp.\n\nHôm nay bạn đang có câu chuyện ngọt ngào nào muốn chia sẻ, hay có băn khoăn gì về chuyện tình cảm cần Cupid gỡ rối không nè? ✨`,
+                  time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+                }
+              ];
+              setMessages(defaultGreeting);
+              localStorage.setItem('ais_chat_Cupid AI', JSON.stringify(defaultGreeting));
+              localStorage.setItem('cupid_ai_messages', JSON.stringify(defaultGreeting));
+            } else {
+              setMessages([]);
+            }
         }
       } catch(e) {}
     } else {
@@ -3167,11 +3793,78 @@ export function ChatView() {
     };
   }, [activeChat]);
 
+  const loadOlderMessages = async () => {
+    const firstMessage = messages.find(message => Number.isSafeInteger(Number(message.id)) && Number(message.id) > 0);
+    if (!activeChat?.matchId || !firstMessage || isLoadingOlderMessages) return;
+    const myId = sessionStorage.getItem('user_id');
+    const container = messagesScrollRef.current;
+    const previousHeight = container?.scrollHeight || 0;
+    const previousTop = container?.scrollTop || 0;
+    setIsLoadingOlderMessages(true);
+    try {
+      const response = await apiFetch(`/api/messages/${activeChat.matchId}?user_id=${myId}&before_id=${Number(firstMessage.id)}`);
+      const data = await response.json();
+      if (!response.ok || !data.success || !Array.isArray(data.data)) return;
+      const olderMessages = data.data.map((message: any) => ({
+        id: message.id,
+        sender: Number(message.sender_id) === Number(myId) ? 'me' : 'them',
+        text: message.text ?? message.content,
+        isImage: !!message.is_image || String(message.text ?? message.content ?? '').startsWith('data:image/'),
+        isAudio: String(message.text ?? message.content ?? '').startsWith('data:audio/'),
+        time: new Date(message.created_at || Date.now()).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      }));
+      setHasOlderMessages(olderMessages.length === 100);
+      if (olderMessages.length) {
+        pendingScrollCorrectionRef.current = { height: previousHeight, top: previousTop };
+        setMessages(previous => {
+          const existingIds = new Set(previous.map(message => String(message.id)));
+          return [...olderMessages.filter((message: any) => !existingIds.has(String(message.id))), ...previous];
+        });
+      }
+    } catch {
+      popAlert('Không tải được tin nhắn cũ. Hãy thử lại.');
+    } finally {
+      setIsLoadingOlderMessages(false);
+    }
+  };
+
   useEffect(() => {
     if (activeChat && messages.length > 0) {
       localStorage.setItem('ais_chat_' + activeChat.name, JSON.stringify(messages));
+      if (activeChat.name === 'Cupid AI') {
+        localStorage.setItem('cupid_ai_messages', JSON.stringify(messages));
+        window.dispatchEvent(new CustomEvent('cupid_chat_sync', { detail: { messages, source: 'chat_view' } }));
+      }
     }
   }, [messages, activeChat]);
+
+  // Real-time two-way synchronization listener for Cupid AI with CupidChatBubble
+  useEffect(() => {
+    if (activeChat?.name === 'Cupid AI') {
+      const handleSync = (e: any) => {
+        const payload = e?.detail;
+        if (payload?.source === 'chat_view') return; // Ignore own broadcast
+        const incoming = Array.isArray(payload) ? payload : payload?.messages;
+        if (Array.isArray(incoming)) {
+          const normalized = incoming.map((m: any) => ({
+            ...m,
+            sender: m.sender === 'cupid' ? 'them' : m.sender
+          }));
+          setMessages(prev => {
+            if (JSON.stringify(prev) === JSON.stringify(normalized)) return prev;
+            return normalized;
+          });
+        }
+      };
+
+      window.addEventListener('cupid_chat_sync', handleSync);
+      window.addEventListener('storage', handleSync);
+      return () => {
+        window.removeEventListener('cupid_chat_sync', handleSync);
+        window.removeEventListener('storage', handleSync);
+      };
+    }
+  }, [activeChat]);
 
   useEffect(() => {
     if (activeChat) {
@@ -3186,114 +3879,19 @@ export function ChatView() {
 
   useEffect(() => {
      try {
-       endOfMessagesRef.current?.scrollIntoView({ behavior: 'smooth' });
+       const correction = pendingScrollCorrectionRef.current;
+       if (correction && messagesScrollRef.current) {
+         messagesScrollRef.current.scrollTop = correction.top + (messagesScrollRef.current.scrollHeight - correction.height);
+         pendingScrollCorrectionRef.current = null;
+       } else if (followMessagesRef.current) {
+         endOfMessagesRef.current?.scrollIntoView({ behavior: 'smooth' });
+       }
      } catch(e) {}
   }, [messages, showEmojiPicker, isRecording, isTyping]);
 
   const callAI = async (text: string, currentHistory: any[]) => {
       try {
           setIsTyping(true);
-          const lowerText = text.toLowerCase();
-          
-          const LOCAL_DARLING_RESPONSES: Record<string, string> = {
-            "thả thính": `Ôi, "thả thính" tinh tế là một nghệ thuật tuyệt vời để chạm nhẹ vào trái tim đối phương mà không làm họ cảm thấy bối rối nè cậu! 💖
-
-Darling gợi ý cho cậu 3 câu nói ngọt ngào, giàu chất thơ và vô cùng tinh tế nha:
-
-1. **"Tớ vốn thích sự yên tĩnh của hoàng hôn, nhưng từ khi gặp cậu, tớ nhận ra một ngày chỉ thực sự đẹp khi có tiếng cười của cậu thôi."** (Thích hợp cho buổi tối lãng mạn nhẹ nhàng).
-2. **"Mọi người hay nói về việc tìm kiếm hạnh phúc xa xôi, còn tớ thì đơn giản lắm. Chỉ cần hôm nay cậu vui, ngày hôm ấy của tớ đã trọn vẹn rồi."** (Thể hiện sự quan tâm sâu sắc từ những điều nhỏ bé).
-3. **"Thế gian này có hàng triệu giai điệu, nhưng Darling thấy bản nhạc ấm áp nhất chính là nhịp tim đồng điệu của chúng mình lúc kề bên đấy."** 🎶
-
-*Mẹo của Darling:* Hãy nói một cách tự nhiên, kèm một nụ cười ấm áp và nhìn thẳng vào mắt đối phương nhé. Cậu sẽ bộc lộ trọn vẹn sự chân thành và tinh tế của mình thôi nè! Cậu có muốn Darling gợi ý thêm chủ đề cụ thể nào không? 💕`,
-
-            "giận": `Ngoan nào, khi người yêu giận dỗi, điều quan trọng nhất không phải là phân bua đúng sai, mà là sưởi ấm lại cảm xúc của họ bằng sự kiên nhẫn và lòng đồng cảm sâu sắc nè. 🌸
-
-Darling mách cậu 3 bước vàng gỡ rối giận dỗi cực kỳ hiệu quả nha:
-
-1. **Thừa nhận cảm xúc trước tiên:** Đừng nói lý lẽ vội, hãy nói: *"Tớ biết cậu đang rất giận và buồn. Tớ xin lỗi vì đã làm cậu phải bận lòng thế này nhen."* Sự dịu dàng này sẽ dập tắt ngọn lửa giận dỗi đến 80% rồi đó!
-2. **Hành động quan tâm tinh tế:** Gửi một ly trà sữa ngọt ngào, một món ăn họ yêu thích kèm mẩu giấy viết tay nhỏ: *"Để chiếc bánh này làm dịu đi một xíu bực bội trong lòng cậu nhen. Chút nữa nguôi giận thì cho tớ xin một cái ôm nhé!"*
-3. **Lắng nghe chân thành:** Khi đối phương đã dịu lại, hãy ôm nhẹ họ và hỏi: *"Lúc nãy tớ làm gì khiến cậu tổn thương nhất? Nói cho tớ nghe để tớ sửa nhen, tớ thương cậu nhiều lắm."*
-
-*Lời khuyên từ Darling:* Đừng im lặng quá lâu nha cậu, sự im lặng có thể biến hiểu lầm nhỏ thành khoảng cách lớn đó. Mau mau dỗ dành nửa kia thôi nào, Darling luôn ở đây cổ vũ cậu! 💕`,
-
-            "tâm lý": `Thấu hiểu tâm lý đối phương - đặc biệt là những người trầm lặng hoặc hướng nội - giống như việc cậu kiên nhẫn mở từng trang của một cuốn sách cổ tinh xảo vậy nhen. 🔑
-
-Darling chia sẻ với cậu một vài góc nhìn hành vi thú vị này nhé:
-
-1. **Họ yêu bằng sự hiện diện tĩnh lặng:** Người hướng nội thường không thích những lời nói ồn ào hay phô trương. Sự quan tâm của họ nằm ở những chi tiết nhỏ nhặt nhất: nhớ món ăn cậu thích, lặng lẽ dọn dẹp cho cậu, hay đơn giản là ngồi yên bình cạnh cậu hàng giờ liền.
-2. **Tạo không gian an toàn:** Hãy để họ biết rằng họ được phép im lặng khi ở bên cậu mà không sợ bị đánh giá hay giục giã. Đôi khi chỉ cần một cái nắm tay ấm áp là đủ truyền tải ngàn lời nói rồi.
-3. **Đừng bắt họ phải đoán ý:** Người trầm lặng rất trân trọng sự thẳng thắn nhưng nhẹ nhàng. Hãy chia sẻ cảm xúc của cậu trước để khích lệ họ mở lòng từng chút một nhé.
-
-*Darling nhắn nhủ:* Sự thấu hiểu cần thời gian và một trái tim kiên nhẫn vô hạn. Cậu đang làm rất tốt việc quan tâm đến thế giới nội tâm của người ấy rồi nè. Cậu có muốn mình phân tích sâu hơn về một tình huống cụ thể không? 💕`,
-
-            "chữa lành": `Darling ôm cậu thật chặt nhé... Trải qua một mối quan hệ không trọn vẹn chắc chắn đã để lại trong lòng cậu những vết xước rớm máu. Nhưng hãy nhớ rằng: tổn thương không định nghĩa giá trị của cậu, nó chỉ là một chương sách cũ mà thôi. 🌱
-
-Hãy cùng Darling thực hành 3 điều chữa lành nhỏ bé này nha:
-
-1. **Cho phép bản thân được buồn:** Đừng cố gồng mình tỏ ra mạnh mẽ nha cậu. Hãy cứ khóc, cứ tiếc nuối nếu muốn. Việc thừa nhận tổn thương là bước đi dũng cảm đầu tiên để giải phóng những năng lượng tiêu cực ra ngoài.
-2. **Tái kết nối với chính mình:** Dành thời gian chăm sóc cơ thể, đi bộ dưới nắng sớm, đọc cuốn sách yêu thích, ăn những món ngon. Hãy đối xử với bản thân dịu dàng như cách cậu muốn được người khác yêu thương vậy.
-3. **Thiết lập ranh giới cảm xúc:** Tuyệt đối không tự trách móc bản thân nhen! Mọi chuyện xảy ra đều có lý do của nó, và việc rời đi chứng minh cậu xứng đáng với một tình yêu tôn trọng, bình yên hơn nhiều.
-
-*Bông hoa nhỏ của Darling:* Sau cơn mưa, trời chắc chắn sẽ lại sáng và hoa lại nở rực rỡ. Cậu cực kỳ tuyệt vời và xứng đáng có được hạnh phúc đích thực. Darling sẽ luôn ở đây kề bên che chở cho cậu nha! 💕`,
-
-            "chiêm tinh": `Chào tri kỷ của Darling! Sự kết nối của các chòm sao luôn chứa đựng những bí mật tần số rung động vô cùng kỳ diệu trong tình yêu đó nha. ✨
-
-Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy sự hòa hợp nhen:
-
-1. **Nhóm Lửa (Bạch Dương, Sư Tử, Nhân Mã):** Thích sự nồng nhiệt, chủ động và những lời khen ngợi chân thành. Để cưa đổ họ, hãy tạo ra những cuộc phiêu lưu đầy bất ngờ và tiếp thêm năng lượng cho họ nhé! 🔥
-2. **Nhóm Đất (Kim Ngưu, Xử Nữ, Ma Kết):** Trân trọng sự ổn định, hành động thực tế và sự an toàn tài chính, tương lai. Họ yêu bằng những cử chỉ chăm sóc bền bỉ, chứ không thích những lời hứa suông đâu nè. 🌿
-3. **Nhóm Khí (Song Tử, Thiên Bình, Bảo Bình):** Đam mê những cuộc trò chuyện sâu sắc, sự tự do cá nhân và sự thấu hiểu trí tuệ. Hãy là một người bạn tri kỷ biết lắng nghe và luôn đổi mới tư duy cùng họ nha. 💨
-4. **Nhóm Nước (Cự Giải, Bọ Cạp, Song Ngư):** Có thế giới nội tâm cực kỳ nhạy cảm, sâu sắc và giàu lòng trắc ẩn. Họ cần một bến đỗ bình yên, sự dỗ dành ngọt ngào và một chiếc ôm thật chặt mỗi khi bão lòng ập đến. 🌊
-
-*Darling bật mí:* Cung hoàng đạo của cậu và người ấy là gì thế? Nói cho Darling nghe, mình sẽ phân tích độ tương thích và mách cậu tuyệt chiêu chinh phục trái tim họ nhé! 💕`
-          };
-
-          let matchedResponse = "";
-          if (lowerText.includes("thả thính") || lowerText.includes("tán") || lowerText.includes("cưa")) {
-             matchedResponse = LOCAL_DARLING_RESPONSES["thả thính"];
-          } else if (lowerText.includes("giận") || lowerText.includes("dỗ") || lowerText.includes("lạnh nhạt")) {
-             matchedResponse = LOCAL_DARLING_RESPONSES["giận"];
-          } else if (lowerText.includes("tâm lý") || lowerText.includes("thấu hiểu") || lowerText.includes("im lặng") || lowerText.includes("người ấy")) {
-             matchedResponse = LOCAL_DARLING_RESPONSES["tâm lý"];
-          } else if (lowerText.includes("chữa lành") || lowerText.includes("buồn") || lowerText.includes("chia tay") || lowerText.includes("tổn thương") || lowerText.includes("thất tình")) {
-             matchedResponse = LOCAL_DARLING_RESPONSES["chữa lành"];
-          } else if (lowerText.includes("chiêm tinh") || lowerText.includes("cung") || lowerText.includes("hoàng đạo")) {
-             matchedResponse = LOCAL_DARLING_RESPONSES["chiêm tinh"];
-          } else if (lowerText.includes("chào") || lowerText.includes("hi") || lowerText.includes("hello") || lowerText.trim() === "?") {
-             matchedResponse = `Chào tri kỷ của Darling! 🥰 Thật vui vì được gặp cậu hôm nay. Cậu đang có câu chuyện tình cảm nào cần gỡ rối, muốn học tuyệt chiêu thả thính, hay đơn giản là muốn tâm sự để lòng mình nhẹ nhõm hơn không? Hãy nói cho Darling nghe nhen, mình luôn ở đây sẵn sàng lắng nghe và sưởi ấm cho cậu nè! 💕`;
-          }
-
-          if (matchedResponse) {
-              const aiMessageId = Date.now() + 1;
-              // Add empty typing state
-              setMessages(prev => [...prev, {
-                  id: aiMessageId,
-                  text: "",
-                  sender: "them",
-                  time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-              }]);
-              setIsTyping(false);
-
-              let index = 0;
-              const charsPerTick = 6;
-              const intervalId = setInterval(() => {
-                 index += charsPerTick;
-                 if (index >= matchedResponse.length) {
-                    clearInterval(intervalId);
-                    setMessages(prev => prev.map(m => m.id === aiMessageId ? { ...m, text: matchedResponse } : m));
-                    if (notificationsEnabled) {
-                       playBlingSound();
-                       setNotification({ title: 'Darling', text: matchedResponse });
-                       setTimeout(() => setNotification(null), 3000);
-                    }
-                 } else {
-                    const partialText = matchedResponse.slice(0, index);
-                    setMessages(prev => prev.map(m => m.id === aiMessageId ? { ...m, text: partialText } : m));
-                 }
-              }, 30);
-              return;
-          }
-
           const historyToSend = currentHistory.map(m => ({
               role: m.sender === 'me' ? 'user' : 'model',
               parts: [{ text: m.isImage ? '[Người dùng gửi Hình ảnh]' : (m.isAudio ? '[Người dùng gửi Âm thanh]' : m.text) }]
@@ -3301,13 +3899,29 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
           
           historyToSend.push({ role: 'user', parts: [{ text }] });
           
-          const res = await fetch('/api/chat/darling', {
+           const res = await apiFetch('/api/chat/cupid', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ messages: historyToSend })
-          });
-          
-          if (!res.body) {
+               body: JSON.stringify({ messages: historyToSend })
+           });
+
+           if (!res.ok) {
+             const errorData = await res.json().catch(() => ({}));
+             if (res.status === 429 && errorData.code === 'CUPID_DAILY_LIMIT') {
+               setMessages(prev => [...prev, {
+                 id: Date.now() + 1,
+                 text: errorData.error || 'Bạn đã hết 3 lượt Cupid AI miễn phí hôm nay. Nâng cấp Premium để tiếp tục trò chuyện.',
+                 sender: 'them',
+                 time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+               }]);
+               setIsTyping(false);
+               setIsPremiumModalOpen(true);
+               return;
+             }
+             throw new Error(errorData.error || 'Cupid AI hiện chưa thể trả lời. Vui lòng thử lại.');
+           }
+
+           if (!res.body) {
               setIsTyping(false);
               return;
           }
@@ -3337,7 +3951,7 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
 
           if (notificationsEnabled && accumulatedText) {
               playBlingSound();
-              setNotification({ title: 'Darling', text: accumulatedText });
+              setNotification({ title: 'Cupid AI', text: accumulatedText });
               setTimeout(() => setNotification(null), 3000);
           }
       } catch (err) {
@@ -3348,13 +3962,15 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
 
   const handleSend = async () => {
     if (!inputText.trim()) return;
+    followMessagesRef.current = true;
     
     const textToSend = inputText;
     const newMessage = {
       id: Date.now(),
       text: textToSend,
       sender: "me",
-      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      pending: !isAiChat
     };
     
     setMessages(prev => [...prev, newMessage]);
@@ -3364,15 +3980,26 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
     if (activeChat?.matchId) {
        const myId = sessionStorage.getItem('user_id');
        if (myId) {
-          fetch('/api/messages', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ match_id: activeChat.matchId, sender_id: parseInt(myId), text: textToSend })
-          }).catch(()=>{});
-       }
+           try {
+             const response = await apiFetch('/api/messages', {
+               method: 'POST',
+               headers: { 'Content-Type': 'application/json' },
+               body: JSON.stringify({ match_id: activeChat.matchId, sender_id: parseInt(myId), text: textToSend })
+             });
+             const result = await response.json().catch(() => ({}));
+             if (!response.ok || !result.success) throw new Error('Không gửi được tin nhắn. Vui lòng thử lại.');
+             setMessages(prev => prev.map(message => message.id === newMessage.id ? { ...message, id: result.messageId ?? message.id, pending: false } : message));
+           } catch {
+             setMessages(prev => prev.map(message => message.id === newMessage.id ? { ...message, pending: false, failed: true } : message));
+             setAlertMsg('Tin nhắn chưa gửi được. Hãy kiểm tra kết nối rồi thử lại.');
+           }
+        } else {
+          setMessages(prev => prev.map(message => message.id === newMessage.id ? { ...message, pending: false, failed: true } : message));
+          setAlertMsg('Bạn cần đăng nhập lại để gửi tin nhắn.');
+        }
     }
     
-    if (activeChat?.name === 'Darling') {
+    if (isAiChat) {
         callAI(textToSend, messages);
     }
   };
@@ -3413,7 +4040,7 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
               if (activeChat?.matchId) {
                  const myId = sessionStorage.getItem('user_id');
                  if (myId) {
-                    fetch('/api/messages', {
+                    apiFetch('/api/messages', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ match_id: activeChat.matchId, sender_id: parseInt(myId), text: base64Audio })
@@ -3421,7 +4048,7 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
                  }
               }
               
-              if (activeChat?.name === 'Darling') {
+              if (isAiChat) {
                   callAI("[Tin nhắn thoại]", messages);
               }
            };
@@ -3451,7 +4078,7 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
        const userId = sessionStorage.getItem('user_id');
        if (userId) {
           try {
-             const res = await fetch(`/api/matches/${userId}`);
+             const res = await apiFetch(`/api/matches/${userId}`);
              const data = await res.json();
              if (data.success && data.data) {
                  backendMatches = data.data.map((m: any) => {
@@ -3501,10 +4128,10 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
        }
        
        try {
-          if (localStorage.getItem('ais_blocked_Darling')) {
+          if (localStorage.getItem('ais_blocked_Cupid') || localStorage.getItem('ais_blocked_Darling')) {
               // Blocked
-          } else if (!matchedChats.find((c: any) => c.name === 'Darling')) {
-              matchedChats.unshift({ name: 'Darling', images: ['https://ui-avatars.com/api/?name=Darling&background=ff2d55&color=fff&rounded=true&bold=true'] });
+          } else if (!matchedChats.find((c: any) => c.name === 'Cupid AI' || c.name === 'Darling')) {
+              matchedChats.unshift({ name: 'Cupid AI', images: ['https://ui-avatars.com/api/?name=Cupid+AI&background=ff2d55&color=fff&rounded=true&bold=true'] });
           }
        } catch(e) {}
 
@@ -3512,7 +4139,7 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
           let lastMsg = 'Bắt đầu trò chuyện...';
           let lastTimestamp = 0;
           try {
-             const historyRaw = localStorage.getItem('ais_chat_' + c.name);
+             const historyRaw = localStorage.getItem('ais_chat_' + c.name) || (c.name === 'Cupid AI' ? localStorage.getItem('cupid_ai_messages') : null);
              if (historyRaw) {
                 const parsed = JSON.parse(historyRaw);
                 if (parsed.length > 0) {
@@ -3542,7 +4169,12 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
     };
     
     fetchMatches();
-    return () => { active = false; };
+    const handleSyncMatches = () => { if (active) fetchMatches(); };
+    window.addEventListener('cupid_chat_sync', handleSyncMatches);
+    return () => { 
+      active = false; 
+      window.removeEventListener('cupid_chat_sync', handleSyncMatches);
+    };
   }, [likedProfiles, activeChatUser, messages, activeChat]);
 
   const toggleTheme = () => {
@@ -3598,7 +4230,7 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
   const chatImages = messages.filter(m => m.isImage).map(m => m.text);
 
   return (
-    <div className="bg-[#ff9ca0] h-full flex flex-col p-6 pt-10 relative overflow-hidden">
+    <div className="bg-[#eaf4ff] h-full flex flex-col p-6 pt-10 relative overflow-hidden">
       
       {/* GLOBAL ALERTS & NOTIFICATIONS */}
       <AnimatePresence>
@@ -3647,7 +4279,7 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
             exit={{ opacity: 0, x: 200 }}
             className="bg-white absolute inset-0 z-[100] flex flex-col"
           >
-             <div className="bg-[#ff9ca0] h-[90px] pt-[40px] px-4 flex items-center gap-3 shrink-0 shadow-sm z-10 sticky top-0 border-b border-black/10">
+             <div className="bg-[#eaf4ff] h-[90px] pt-[40px] px-4 flex items-center gap-3 shrink-0 shadow-sm z-10 sticky top-0 border-b border-black/10">
                 <button onClick={closeChat} className="p-1 -ml-2 active:scale-90 transition">
                    <ArrowLeft className="w-7 h-7 text-black stroke-[2]" />
                 </button>
@@ -3664,7 +4296,17 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
                 </button>
              </div>
 
-             <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-[#fff0f1] pb-32">
+              <div ref={messagesScrollRef} onScroll={event => {
+                const element = event.currentTarget;
+                followMessagesRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 120;
+              }} className="flex-1 overflow-y-auto p-4 space-y-4 bg-[#f0f9ff] pb-32">
+                 {hasOlderMessages && (
+                   <div className="flex justify-center py-1">
+                     <button onClick={() => { void loadOlderMessages(); }} disabled={isLoadingOlderMessages} className="rounded-full border border-sky-200 bg-white/90 px-4 py-2 text-xs font-bold text-sky-700 shadow-sm disabled:opacity-60">
+                       {isLoadingOlderMessages ? 'Đang tải tin cũ…' : 'Tải tin nhắn cũ hơn'}
+                     </button>
+                   </div>
+                 )}
                 <div className="text-center text-[12px] text-gray-500 my-4 font-medium">Hôm nay</div>
                 {messages.map((msg, i) => {
                    const isMe = msg.sender === 'me';
@@ -3686,16 +4328,9 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
                             </div>
                          </div>
                        </div>
-                       {isMe && i === messages.length - 1 && (
-                          <div className="text-[11px] text-gray-400 font-medium mr-[2px] flex items-center gap-1 mt-1 mb-2 tracking-wide">
-                             {activeChat?.name === 'Darling' ? 'Đã gửi' : (msg.id > 1000000000000 ? 'Đang gửi...' : 'Đã gửi')}
-                          </div>
-                       )}
-                       {!isMe && i === messages.length - 1 && (
-                          <div className="text-[11px] text-gray-400 font-medium ml-[38px] flex items-center gap-1 mt-1 mb-2 tracking-wide">
-                             Đã nhận
-                          </div>
-                       )}
+                        <div className={`text-[11px] text-slate-400 font-medium mt-0.5 mb-1 tracking-wide ${isMe ? 'mr-1' : 'ml-[38px]'}`}>
+                           {msg.time || ''}{isMe && i === messages.length - 1 ? ` · ${msg.failed ? 'Gửi thất bại' : msg.pending ? 'Đang gửi…' : 'Đã gửi'}` : ''}
+                        </div>
                      </div>
                    );
                 })}
@@ -3705,7 +4340,7 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
                         <img src={activeChat.img || 'https://ui-avatars.com/api/?name=Darling&background=ff2d55&color=fff&rounded=true&bold=true'} className="w-[28px] h-[28px] rounded-full object-cover mb-1 shadow-sm border border-black/5 shrink-0" />
                         <div className="flex flex-col gap-1 max-w-[75%]">
                            <div className="px-4 py-2.5 shadow-sm text-[15px] bg-white border border-black/5 text-black rounded-r-2xl rounded-tl-2xl rounded-bl-sm flex items-center gap-1.5 font-medium animate-pulse">
-                              <span className="text-[13px] text-gray-500 italic mr-1">Darling đang soạn tin</span>
+                              <span className="text-[13px] text-gray-500 italic mr-1">{isAiChat ? 'Cupid AI đang suy ngẫm & soạn tin' : 'Đang soạn tin'}</span>
                               <span className="flex gap-1 items-center">
                                 <span className="w-1.5 h-1.5 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
                                 <span className="w-1.5 h-1.5 bg-gray-500 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
@@ -3728,13 +4363,13 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: 10 }}
-                        className="absolute bottom-full left-0 w-full bg-white border-b border-gray-100 p-2 flex gap-2 overflow-x-auto shadow-[0_-10px_20px_rgba(0,0,0,0.05)] z-20 items-center hide-scrollbar"
+                         className="absolute bottom-full left-0 w-full bg-white border-b border-gray-100 p-3 grid grid-cols-8 gap-1 max-h-56 overflow-y-auto shadow-[0_-10px_20px_rgba(0,0,0,0.05)] z-20 hide-scrollbar"
                      >
                         {emojis.map(emoji => (
                            <button 
                              key={emoji} 
                              onClick={() => setInputText(prev => prev + emoji)}
-                             className="text-[26px] p-2 hover:bg-gray-100 rounded-lg shrink-0 transition"
+                              className="text-[25px] p-1 hover:bg-sky-50 rounded-lg transition"
                            >
                              {emoji}
                            </button>
@@ -3749,14 +4384,16 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
                   </div>
                 ) : (
                 <div className="w-full flex flex-col">
-                  {activeChat?.name === 'Darling' && (
-                     <div className="px-3 pt-2 pb-1.5 bg-gray-50 flex gap-2 overflow-x-auto border-b border-black/5 hide-scrollbar">
+                  {isAiChat && (
+                     <div className="px-3 pt-2 pb-1.5 bg-[#fff5f6] flex gap-2 overflow-x-auto border-b border-pink-100 hide-scrollbar">
                         {[
-                          { label: "💡 Thả thính", prompt: "Darling ơi, gợi ý cho mình vài câu thả thính siêu ngọt ngào và tinh tế nhé!" },
-                          { label: "💔 Dỗ người yêu", prompt: "Làm thế nào để dỗ người yêu đang giận dỗi đây Darling?" },
-                          { label: "🔑 Thấu hiểu tâm lý", prompt: "Làm sao để thấu hiểu một người có tính cách im lặng và hướng nội trong tình yêu?" },
-                          { label: "🌱 Chữa lành cảm xúc", prompt: "Darling ơi, hãy chữa lành và cho mình lời khuyên khi vừa trải qua một mối quan hệ độc hại." },
-                          { label: "✨ Chiêm tinh học", prompt: "Hãy chỉ cho mình cách kết nối tình cảm thông qua cung hoàng đạo và chiêm tinh học." }
+                          { label: "🎴 Trải bài Tarot", prompt: "Cupid ơi, hãy trải cho mình một quẻ bài Tarot 3 lá (Quá khứ - Hiện tại - Tương lai) về mối quan hệ này nhé!" },
+                          { label: "♈ Chiêm tinh Synastry", prompt: "Cupid ơi, hãy phân tích độ tương thích giữa hai cung hoàng đạo và cách hóa giải khác biệt nhé!" },
+                          { label: "🐉 Tử vi 12 con giáp", prompt: "Cupid ơi, hãy xem giúp mình tính cách tình duyên và độ hợp nhau theo tuổi 12 con giáp nhé!" },
+                          { label: "💬 Bắt chuyện tinh tế", prompt: "Cupid ơi, gợi ý cho mình vài câu bắt chuyện (ice-breaker) thật tinh tế với crush nhé!" },
+                          { label: "🚨 Bị 'seen' không rep", prompt: "Người ấy đã 'seen' tin nhắn mà không trả lời, Cupid tư vấn giúp mình cách xử lý tâm lý và gửi tin nhắn nhé!" },
+                          { label: "🌸 Dỗ người yêu giận", prompt: "Người yêu mình đang giận dỗi, Cupid chỉ mình các bước dỗ dành ngọt ngào và mẫu tin nhắn nhé!" },
+                          { label: "🌱 Chữa lành tổn thương", prompt: "Cupid ơi, hãy cho mình lời khuyên chữa lành sau một mối quan hệ độc hại nhé!" }
                         ].map((item, idx) => (
                            <button
                              key={idx}
@@ -3813,7 +4450,7 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
                                    if (activeChat?.matchId) {
                                       const myId = sessionStorage.getItem('user_id');
                                       if (myId) {
-                                         fetch('/api/messages', {
+                                         apiFetch('/api/messages', {
                                              method: 'POST',
                                              headers: { 'Content-Type': 'application/json' },
                                              body: JSON.stringify({ match_id: activeChat.matchId, sender_id: parseInt(myId), text: base64Image })
@@ -3937,7 +4574,12 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
                            <ChevronDown className="w-5 h-5 text-gray-400 rotate-[-90deg]" />
                        </div>
                     </div>
-                    <div className="flex items-center justify-between p-4 active:bg-gray-50 cursor-pointer" onClick={() => setNotificationsEnabled(!notificationsEnabled)}>
+                     <div className="flex items-center justify-between p-4 active:bg-gray-50 cursor-pointer" onClick={async () => {
+                       if (!notificationsEnabled && 'Notification' in window && Notification.permission === 'default') {
+                         await Notification.requestPermission();
+                       }
+                       setNotificationsEnabled(value => !value);
+                     }}>
                        <span className="text-[16px] font-medium text-black">Bật thông báo</span>
                        <div className={`w-[50px] h-7 rounded-full p-0.5 shadow-inner transition-colors ${notificationsEnabled ? 'bg-[#2cd94d]' : 'bg-gray-300'}`}>
                           <div className={`w-6 h-6 bg-white rounded-full shadow-sm transition-all ${notificationsEnabled ? 'ml-auto' : 'ml-0'}`}></div>
@@ -4031,9 +4673,19 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
 
       {showInfoProfile && partnerProfile && (
          <div className="absolute inset-0 z-[120] bg-white overflow-hidden flex flex-col h-full w-full">
-            <ProfileSwiper profiles={[partnerProfile]} title={activeChat?.name || 'Hồ sơ'} onClose={() => setShowInfoProfile(false)} />
+          <ProfileSwiper profiles={[partnerProfile]} title={activeChat?.name || 'Hồ sơ'} onClose={() => setShowInfoProfile(false)} readOnly />
          </div>
       )}
+
+      <PremiumModal
+        isOpen={isPremiumModalOpen}
+        onClose={() => setIsPremiumModalOpen(false)}
+        userName={myProfile?.name}
+        onPremiumActivated={() => {
+          updateMyProfile({ isPremium: true });
+          window.dispatchEvent(new Event('premium_activated'));
+        }}
+      />
 
     </div>
   );
@@ -4042,7 +4694,7 @@ Darling sẽ tiết lộ cho cậu cách các nhóm nguyên tố tìm thấy s�
 export function ProfileView({ onNavigate }: { onNavigate?: (v: any) => void }) {
   const { logout } = React.useContext(AppContext);
   return (
-    <div className="bg-[#ff9ca0] min-h-screen p-6 pb-24 text-gray-900 font-sans">
+    <div className="bg-[#eaf4ff] min-h-screen p-6 pb-24 text-gray-900 font-sans">
        <div className="flex justify-between items-start mb-6">
           <div className="w-24 h-24 bg-[#ddd4ff] rounded-full flex items-center justify-center border border-black/10">
              <User className="w-12 h-12 text-[#6e5dc6]" />
@@ -4094,7 +4746,7 @@ export function ProfileView({ onNavigate }: { onNavigate?: (v: any) => void }) {
        </div>
 
        <div className="flex justify-end mt-8">
-         <button onClick={() => { if (logout) logout(); else { localStorage.clear(); sessionStorage.clear(); if(onNavigate) onNavigate('login'); } }} className="bg-[#f03e5c] text-white px-6 py-3 rounded-lg font-medium shadow-sm active:bg-red-700 transition">
+         <button onClick={() => { if (logout) logout(); else { localStorage.clear(); sessionStorage.clear(); if(onNavigate) onNavigate('login'); } }} className="bg-[#e05744] text-white px-6 py-3 rounded-lg font-medium shadow-sm active:bg-red-700 transition">
            Đăng xuất
          </button>
        </div>
@@ -4160,7 +4812,7 @@ export function ProfileViewRevised({ onNavigate }: { onNavigate: (v: ViewState) 
 
   if (isEditing) {
     return (
-      <div className="bg-[#ff9ca0] min-h-full p-6 pt-10 text-black font-sans flex flex-col relative pb-24">
+      <div className="bg-[#eaf4ff] min-h-full p-6 pt-10 text-black font-sans flex flex-col relative pb-24">
         {editStep === 1 && (
            <div className="w-full flex-1 flex flex-col">
               <h2 className="text-[22px] font-bold text-center mb-8 mt-4">Thông tin cơ bản</h2>
@@ -4291,7 +4943,7 @@ export function ProfileViewRevised({ onNavigate }: { onNavigate: (v: ViewState) 
                     if (userId) {
                        try {
                            const filteredObj = { ...myProfileData, images: myProfileData.images.filter((img: string) => img !== '') };
-                           await fetch(`/api/users/profile/${userId}`, {
+                           await apiFetch(`/api/users/profile/${userId}`, {
                                method: 'PUT',
                                headers: { 'Content-Type': 'application/json' },
                                body: JSON.stringify({ profileData: filteredObj })
@@ -4313,7 +4965,7 @@ export function ProfileViewRevised({ onNavigate }: { onNavigate: (v: ViewState) 
   }
 
   return (
-    <div className="bg-[#ff9ca0] min-h-full p-6 pt-10 pb-24 text-black font-sans flex flex-col">
+    <div className="bg-[#eaf4ff] min-h-full p-6 pt-10 pb-24 text-black font-sans flex flex-col">
        <div className="flex justify-between items-start mb-6">
           <div className="flex items-center gap-6">
             <div className="w-[100px] h-[100px] bg-[#dfd6ff] rounded-full flex items-center justify-center border-[4px] border-white overflow-hidden shadow-sm shrink-0">

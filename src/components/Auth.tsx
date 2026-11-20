@@ -1,3 +1,4 @@
+import { apiFetch } from '../utils/api';
 import React from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ViewState } from '../types';
@@ -18,33 +19,7 @@ export function Login({ onNavigate, onLoginSuccess }: AuthProps) {
   const [isForgotPassword, setIsForgotPassword] = React.useState(false);
 
   const handleForgotPassword = async () => {
-    if (!email || !password) {
-      setError('Vui lòng nhập email và mật khẩu mới');
-      return;
-    }
-    
-    setError('');
-    setIsSubmitting(true);
-    try {
-      const res = await fetch('/api/auth/change-password', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, newPassword: password })
-      });
-      const data = await res.json();
-      if (res.ok && data.success) {
-         setError('Đổi mật khẩu thành công! Hãy đăng nhập.');
-         setTimeout(() => setError(''), 3000);
-         setIsForgotPassword(false);
-         setPassword('');
-      } else {
-         setError(data.error || 'Không thể đổi mật khẩu');
-      }
-    } catch (e) {
-      setError('Lỗi kết nối server');
-    } finally {
-      setIsSubmitting(false);
-    }
+    setError('Kh?i ph?c m?t kh?u c?n x?c minh qua email. ?ng d?ng ch?a c?u h?nh d?ch v? g?i email; vui l?ng li?n h? qu?n tr? vi?n.');
   };
 
   const handleLogin = async () => {
@@ -58,7 +33,7 @@ export function Login({ onNavigate, onLoginSuccess }: AuthProps) {
     const cleanEmail = email.trim().toLowerCase();
 
     try {
-      const res = await fetch('/api/auth/login', {
+      const res = await apiFetch('/api/auth/login', {
          method: 'POST',
          headers: { 'Content-Type': 'application/json' },
          body: JSON.stringify({ email: cleanEmail, password })
@@ -76,10 +51,9 @@ export function Login({ onNavigate, onLoginSuccess }: AuthProps) {
       sessionStorage.setItem('temp_register_email', cleanEmail); // for ProfileView to read
       localStorage.setItem('auth_token', data.token);
       localStorage.setItem('temp_register_email', cleanEmail);
-      if (data.user && data.user.id) {
-         sessionStorage.setItem('user_id', data.user.id.toString());
-         localStorage.setItem('user_id', data.user.id.toString());
-      }
+      const resolvedUid = data?.user?.id ?? data?.userId ?? 999;
+      sessionStorage.setItem('user_id', String(resolvedUid));
+      localStorage.setItem('user_id', String(resolvedUid));
 
       if (data.user && data.user.profileData) {
          const profile = typeof data.user.profileData === 'string' ? JSON.parse(data.user.profileData) : data.user.profileData;
@@ -115,7 +89,7 @@ export function Login({ onNavigate, onLoginSuccess }: AuthProps) {
   };
 
   return (
-    <div className="min-h-screen bg-[#ff9ca0] flex flex-col items-center justify-center p-6 text-black font-sans box-border relative overflow-hidden">
+    <div className="min-h-screen bg-[#eaf4ff] flex flex-col items-center justify-center p-6 text-slate-800 font-sans box-border relative overflow-hidden">
       <AnimatePresence>
         {error && (
           <motion.div 
@@ -131,14 +105,14 @@ export function Login({ onNavigate, onLoginSuccess }: AuthProps) {
       <div className="w-full max-w-[320px] flex flex-col items-center mt-[-10vh]">
         <h1 className="text-4xl font-bold mb-4 tracking-tight">Darling</h1>
         <div className="relative mb-14 flex justify-center items-center">
-          <Heart className="w-[72px] h-[72px] text-white absolute -left-5 top-2 fill-transparent stroke-[3]" />
-          <Heart className="w-[56px] h-[56px] text-black absolute left-5 top-8 stroke-[3]" />
+          <Heart className="w-[72px] h-[72px] text-blue-500 absolute -left-5 top-2 fill-transparent stroke-[3]" />
+          <Heart className="w-[56px] h-[56px] text-rose-500 absolute left-5 top-8 stroke-[3]" />
         </div>
         
         {isForgotPassword ? (
           <div className="text-center mb-8 mt-16">
-            <h2 className="text-[22px] font-bold mb-2">Đổi mật khẩu</h2>
-            <p className="text-[15px] leading-snug">Nhập Email của bạn và mật khẩu mới để đặt lại.</p>
+            <h2 className="text-[22px] font-bold mb-2">Khôi phục mật khẩu</h2>
+            <p className="text-[15px] leading-snug">Cần xác minh email. Dịch vụ gửi email chưa được cấu hình; vui lòng liên hệ quản trị viên.</p>
           </div>
         ) : (
           <div className="text-center mb-8 mt-16">
@@ -155,13 +129,13 @@ export function Login({ onNavigate, onLoginSuccess }: AuthProps) {
             placeholder={isForgotPassword ? "Email tài khoản" : "email@domain.com"}
             className="w-full px-4 py-3 rounded-[10px] border-none bg-white font-medium placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-white"
           />
-          <input 
+          {!isForgotPassword && <input 
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)} 
-            placeholder={isForgotPassword ? "Mật khẩu mới thay thế" : "Mật khẩu"}
+            placeholder="Mật khẩu"
             className="w-full px-4 py-3 rounded-[10px] border-none bg-white font-medium placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-white mb-1"
-          />
+          />}
           
           {isForgotPassword ? (
             <>
@@ -172,7 +146,7 @@ export function Login({ onNavigate, onLoginSuccess }: AuthProps) {
                    isSubmitting ? 'bg-gray-400' : 'bg-[#ff686b] active:bg-[#e0585c]'
                 }`}
               >
-                {isSubmitting ? 'Đang xử lý...' : 'Đặt lại mật khẩu'}
+                Hướng dẫn khôi phục
               </button>
               <button 
                 onClick={() => { setIsForgotPassword(false); setError(''); setPassword(''); }}
@@ -239,7 +213,7 @@ export function Register({ onNavigate, onLoginSuccess }: AuthProps) {
   };
 
   return (
-    <div className="min-h-screen bg-[#ff9ca0] flex flex-col items-center justify-center p-6 text-black font-sans box-border relative overflow-hidden">
+    <div className="min-h-screen bg-[#eaf4ff] flex flex-col items-center justify-center p-6 text-slate-800 font-sans box-border relative overflow-hidden">
       <AnimatePresence>
         {error && (
           <motion.div 

@@ -1,5 +1,42 @@
 @import "tailwindcss";
 
+@layer base {
+  :root {
+    color-scheme: light;
+    background: #72aeef;
+    color: #18324f;
+    font-synthesis: none;
+  }
+
+  html,
+  body,
+  #root {
+    min-height: 100%;
+    background-color: #5a9de5;
+  }
+
+  body {
+    color: #18324f;
+  }
+
+  button:focus-visible,
+  input:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible {
+    outline: 3px solid #f59e0b;
+    outline-offset: 2px;
+  }
+
+  button:not(:disabled) {
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+}
+
 @layer utilities {
   .scrollbar-hide {
     -ms-overflow-style: none; /* IE and Edge */

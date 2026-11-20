@@ -39,9 +39,11 @@ export type ViewState =
   | 'setup_location'
   | 'welcome'
   | 'app_swipe' 
+  | 'app_moments'
   | 'app_explore' 
   | 'app_likes' 
   | 'app_chat' 
   | 'app_profile' 
+  | 'app_admin'
   | 'app_edit_profile'
   | 'app_settings';

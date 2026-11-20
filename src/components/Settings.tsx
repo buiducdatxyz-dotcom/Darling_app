@@ -1,6 +1,8 @@
-import React, { useState } from 'react';
+import { apiFetch } from '../utils/api';
+import React, { useState, useEffect } from 'react';
 import { ViewState } from '../types';
-import { ArrowLeft, Bell, Lock, CircleHelp, Info, ChevronRight, Check } from 'lucide-react';
+import { ArrowLeft, Bell, Lock, CircleHelp, Info, ChevronRight, Check, Camera, MapPin, FolderOpen, Shield } from 'lucide-react';
+import { AppContext } from './MainApp';
 import { motion, AnimatePresence } from 'motion/react';
 
 interface SettingsProps {
@@ -8,6 +10,7 @@ interface SettingsProps {
 }
 
 export function SettingsView({ onNavigate }: SettingsProps) {
+  const { logout } = React.useContext(AppContext);
   const [activeSubView, setActiveSubView] = useState<null | 'security' | 'notifications' | 'help' | 'about'>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
@@ -15,6 +18,41 @@ export function SettingsView({ onNavigate }: SettingsProps) {
   const [notiPush, setNotiPush] = useState(true);
   const [notiEmail, setNotiEmail] = useState(false);
   const [twoFactor, setTwoFactor] = useState(false);
+
+  // Device permissions
+  const [cameraPerm, setCameraPerm] = useState(() => localStorage.getItem('camera_permission_granted') === 'true');
+  const [locationPerm, setLocationPerm] = useState(() => localStorage.getItem('location_permission_granted') === 'true');
+  const [storagePerm, setStoragePerm] = useState(() => localStorage.getItem('storage_permission_granted') !== 'false');
+
+  const toggleCameraPerm = async () => {
+    const next = !cameraPerm;
+    setCameraPerm(next);
+    localStorage.setItem('camera_permission_granted', String(next));
+    if (next && navigator.mediaDevices?.getUserMedia) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        stream.getTracks().forEach(t => t.stop());
+      } catch (e) {}
+    }
+  };
+
+  const toggleLocationPerm = () => {
+    const next = !locationPerm;
+    setLocationPerm(next);
+    localStorage.setItem('location_permission_granted', String(next));
+    if (next && navigator.geolocation) {
+      navigator.geolocation.getCurrentPosition(
+        () => {},
+        (err) => console.warn("Location error:", err)
+      );
+    }
+  };
+
+  const toggleStoragePerm = () => {
+    const next = !storagePerm;
+    setStoragePerm(next);
+    localStorage.setItem('storage_permission_granted', String(next));
+  };
 
   const [oldPassword, setOldPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
@@ -37,7 +75,7 @@ export function SettingsView({ onNavigate }: SettingsProps) {
      }
 
      try {
-         const res = await fetch('/api/auth/change-email', {
+         const res = await apiFetch('/api/auth/change-email', {
              method: 'POST',
              headers: { 'Content-Type': 'application/json' },
              body: JSON.stringify({ oldEmail, newEmail, password: emailPassword })
@@ -47,7 +85,8 @@ export function SettingsView({ onNavigate }: SettingsProps) {
              setEmailFeedback({ message: 'Đổi email thành công!', isError: false });
              setNewEmail('');
              setEmailPassword('');
-             sessionStorage.setItem('temp_register_email', newEmail);
+              sessionStorage.setItem('temp_register_email', newEmail);
+              localStorage.setItem('temp_register_email', newEmail);
          } else {
              setEmailFeedback({ message: data.error || 'Đổi email thất bại', isError: true });
          }
@@ -57,8 +96,8 @@ export function SettingsView({ onNavigate }: SettingsProps) {
   };
 
   const handleChangePassword = async () => {
-     if (!newPassword) {
-         setPasswordFeedback({ message: 'Vui lòng nhập mật khẩu mới', isError: true });
+      if (!oldPassword || !newPassword) {
+         setPasswordFeedback({ message: 'Vui lòng nhập mật khẩu hiện tại và mật khẩu mới', isError: true });
          return;
      }
      
@@ -69,7 +108,7 @@ export function SettingsView({ onNavigate }: SettingsProps) {
      }
 
      try {
-         const res = await fetch('/api/auth/change-password', {
+         const res = await apiFetch('/api/auth/change-password', {
              method: 'POST',
              headers: { 'Content-Type': 'application/json' },
              body: JSON.stringify({ email, oldPassword, newPassword })
@@ -88,7 +127,7 @@ export function SettingsView({ onNavigate }: SettingsProps) {
   };
 
   return (
-    <div className="min-h-full w-full bg-[#fff0f1] font-sans flex flex-col relative">
+    <div className="min-h-full w-full bg-[#f0f9ff] font-sans flex flex-col relative">
       <div className="w-full flex-1 flex flex-col relative bg-white pb-10 overflow-hidden min-h-screen">
         
         {/* Main Settings View */}
@@ -101,7 +140,7 @@ export function SettingsView({ onNavigate }: SettingsProps) {
               transition={{ duration: 0.2 }}
               className="absolute inset-0 flex flex-col pointer-events-auto h-full"
             >
-              <div className="bg-[#ff9ca0] h-[90px] pt-[40px] px-4 flex items-center shrink-0 shadow-sm z-10 w-full relative">
+              <div className="bg-[#72aeef] h-[90px] pt-[40px] px-4 flex items-center shrink-0 shadow-sm z-10 w-full relative">
                 <button onClick={() => onNavigate('app_profile')} className="p-1 -ml-2 active:scale-90 transition">
                    <ArrowLeft className="w-7 h-7 text-black stroke-[2]" />
                 </button>
@@ -110,7 +149,7 @@ export function SettingsView({ onNavigate }: SettingsProps) {
 
               <div className="flex-1 overflow-y-auto px-5 pt-8 space-y-8 pb-32 bg-[#fafafa]">
                  <div>
-                   <h2 className="text-[14px] font-bold text-[#ff2d55] mb-3 uppercase tracking-wider">Tài khoản & Bảo mật</h2>
+                   <h2 className="text-[14px] font-bold text-[#72aeef] mb-3 uppercase tracking-wider">Tài khoản & Bảo mật</h2>
                    <div className="bg-white rounded-2xl shadow-sm border border-black/5 overflow-hidden">
                       <button onClick={() => setActiveSubView('security')} className="w-full flex items-center justify-between text-[16px] font-medium text-black h-14 px-4 active:bg-gray-50 transition border-b border-black/5">
                          <div className="flex items-center gap-3">
@@ -130,7 +169,72 @@ export function SettingsView({ onNavigate }: SettingsProps) {
                  </div>
 
                  <div>
-                   <h2 className="text-[14px] font-bold text-[#ff2d55] mb-3 uppercase tracking-wider">Hỗ trợ</h2>
+                   <h2 className="text-[14px] font-bold text-[#0284c7] mb-3 uppercase tracking-wider">Quyền truy cập thiết bị</h2>
+                   <div className="bg-white rounded-2xl shadow-sm border border-black/5 overflow-hidden divide-y divide-black/5">
+                      {/* Máy ảnh */}
+                      <div className="flex items-center justify-between p-4">
+                         <div className="flex items-center gap-3 pr-2">
+                           <div className="w-10 h-10 rounded-xl bg-sky-50 flex items-center justify-center shrink-0 border border-sky-100">
+                             <Camera className="w-5 h-5 text-[#0284c7]" />
+                           </div>
+                           <div>
+                             <p className="text-[15px] font-bold text-black">Quyền truy cập máy ảnh</p>
+                             <p className="text-[12px] text-gray-500">Chụp ảnh khoảnh khắc và cập nhật hồ sơ trực tiếp</p>
+                           </div>
+                         </div>
+                         <button 
+                           type="button"
+                           onClick={toggleCameraPerm}
+                           className={`w-12 h-7 rounded-full transition-colors relative p-1 shrink-0 ${cameraPerm ? 'bg-[#0284c7]' : 'bg-gray-300'}`}
+                         >
+                           <div className={`w-5 h-5 rounded-full bg-white shadow-md transition-transform ${cameraPerm ? 'translate-x-5' : 'translate-x-0'}`} />
+                         </button>
+                      </div>
+
+                      {/* Vị trí */}
+                      <div className="flex items-center justify-between p-4">
+                         <div className="flex items-center gap-3 pr-2">
+                           <div className="w-10 h-10 rounded-xl bg-rose-50 flex items-center justify-center shrink-0 border border-rose-100">
+                             <MapPin className="w-5 h-5 text-rose-500" />
+                           </div>
+                           <div>
+                             <p className="text-[15px] font-bold text-black">Quyền truy cập vị trí</p>
+                             <p className="text-[12px] text-gray-500">Gợi ý người dùng xung quanh và hiển thị khoảng cách</p>
+                           </div>
+                         </div>
+                         <button 
+                           type="button"
+                           onClick={toggleLocationPerm}
+                           className={`w-12 h-7 rounded-full transition-colors relative p-1 shrink-0 ${locationPerm ? 'bg-[#0284c7]' : 'bg-gray-300'}`}
+                         >
+                           <div className={`w-5 h-5 rounded-full bg-white shadow-md transition-transform ${locationPerm ? 'translate-x-5' : 'translate-x-0'}`} />
+                         </button>
+                      </div>
+
+                      {/* Thư mục & Thư viện ảnh */}
+                      <div className="flex items-center justify-between p-4">
+                         <div className="flex items-center gap-3 pr-2">
+                           <div className="w-10 h-10 rounded-xl bg-amber-50 flex items-center justify-center shrink-0 border border-amber-100">
+                             <FolderOpen className="w-5 h-5 text-amber-500" />
+                           </div>
+                           <div>
+                             <p className="text-[15px] font-bold text-black">Quyền truy cập thư mục & ảnh</p>
+                             <p className="text-[12px] text-gray-500">Tải ảnh đại diện và lưu ảnh khoảnh khắc</p>
+                           </div>
+                         </div>
+                         <button 
+                           type="button"
+                           onClick={toggleStoragePerm}
+                           className={`w-12 h-7 rounded-full transition-colors relative p-1 shrink-0 ${storagePerm ? 'bg-[#0284c7]' : 'bg-gray-300'}`}
+                         >
+                           <div className={`w-5 h-5 rounded-full bg-white shadow-md transition-transform ${storagePerm ? 'translate-x-5' : 'translate-x-0'}`} />
+                         </button>
+                      </div>
+                   </div>
+                 </div>
+
+                 <div>
+                   <h2 className="text-[14px] font-bold text-[#0284c7] mb-3 uppercase tracking-wider">Hỗ trợ</h2>
                    <div className="bg-white rounded-2xl shadow-sm border border-black/5 overflow-hidden">
                       <button onClick={() => setActiveSubView('help')} className="w-full flex items-center justify-between text-[16px] font-medium text-black h-14 px-4 active:bg-gray-50 transition border-b border-black/5">
                          <div className="flex items-center gap-3">
@@ -152,10 +256,7 @@ export function SettingsView({ onNavigate }: SettingsProps) {
                  <div className="pt-6 flex flex-col gap-4">
                    <button 
                      className="w-full py-4 text-[16px] font-bold text-white bg-[#ff2d55] rounded-xl shadow-md active:bg-[#e02046] transition-colors"
-                     onClick={() => {
-                        localStorage.clear();
-                        sessionStorage.clear(); onNavigate('login');
-                     }}
+                     onClick={() => { if (logout) logout(); else { localStorage.clear(); sessionStorage.clear(); onNavigate('login'); } }}
                    >
                      Đăng xuất
                    </button>
@@ -169,7 +270,7 @@ export function SettingsView({ onNavigate }: SettingsProps) {
                  </div>
                  
                  <div className="w-full text-center mt-12 pb-8">
-                     <span className="text-[32px] font-bold tracking-tighter text-[#ff2d55] opacity-20">Darling</span>
+                     <span className="text-[32px] font-bold tracking-tighter text-[#5a9de5] opacity-20">Aura farming</span>
                      <p className="text-[12px] text-gray-400 font-medium mt-1">Phiên bản 1.0.0 (build 84)</p>
                  </div>
               </div>
@@ -287,9 +388,9 @@ export function SettingsView({ onNavigate }: SettingsProps) {
 
                 {activeSubView === 'about' && (
                   <div className="bg-white rounded-2xl p-6 shadow-sm border border-black/5 text-center flex flex-col items-center">
-                    <span className="text-[40px] font-bold tracking-tighter text-[#ff2d55] drop-shadow-sm mb-4">Darling</span>
+                    <span className="text-[40px] font-bold tracking-tighter text-[#ff2d55] drop-shadow-sm mb-4">Aura</span>
                     <p className="text-[15px] font-medium text-gray-600 mb-6 leading-relaxed">
-                      Darling là nền tảng kết nối và hẹn hò hoàn toàn mới, mang đến cho người dùng những trải nghiệm tìm kiếm chân thật, thú vị cùng phong cách sống hiện đại.
+                      Aura là nền tảng kết nối và hẹn hò hoàn toàn mới, mang đến cho người dùng những trải nghiệm tìm kiếm chân thật, thú vị cùng phong cách sống hiện đại.
                     </p>
                     <div className="w-full space-y-4 text-left border-t border-black/10 pt-6">
                       <div className="flex justify-between items-center text-[15px]">
@@ -298,7 +399,7 @@ export function SettingsView({ onNavigate }: SettingsProps) {
                       </div>
                       <div className="flex justify-between items-center text-[15px]">
                         <span className="text-gray-500 font-medium">Bản quyền</span>
-                        <span className="font-bold">© 2026 Darling Inc.</span>
+                        <span className="font-bold">© 2026 Aura Inc.</span>
                       </div>
                       <div className="flex justify-between items-center text-[15px]">
                         <span className="text-gray-500 font-medium">Điều khoản dịch vụ</span>
@@ -343,13 +444,12 @@ export function SettingsView({ onNavigate }: SettingsProps) {
                         const userId = sessionStorage.getItem('user_id');
                         if (userId) {
                             try {
-                                await fetch(`/api/users/${userId}`, { method: 'DELETE' });
+                                await apiFetch(`/api/users/${userId}`, { method: 'DELETE' });
                             } catch (e) {
                                 console.error(e);
                             }
                         }
-                        localStorage.clear();
-                        sessionStorage.clear(); window.location.reload();
+                        if (logout) logout(); else { localStorage.clear(); sessionStorage.clear(); window.location.reload(); }
                       }}
                       className="w-full py-3.5 bg-red-500 text-white font-bold rounded-xl text-[16px] shadow-sm active:scale-95 transition-transform"
                     >

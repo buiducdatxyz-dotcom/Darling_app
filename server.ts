@@ -7,6 +7,16 @@ import jwt from "jsonwebtoken";
 import cors from "cors";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
+import { randomBytes } from "crypto";
+
+declare global {
+  namespace Express {
+    interface Request {
+      authUserId?: number;
+      authIsAdmin?: boolean;
+    }
+  }
+}
 
 dotenv.config();
 
@@ -30,20 +40,34 @@ function getGemini(): GoogleGenAI {
   return ai;
 }
 
-// MySQL Connection Pool (Create connection if environment variables provided)
-const db = mysql.createPool({
-  host: process.env.DB_HOST || "localhost",
-  port: process.env.DB_PORT ? parseInt(process.env.DB_PORT) : 3306,
-  user: process.env.DB_USER || "root",
-  password: process.env.DB_PASSWORD || "",
-  database: process.env.DB_NAME || "darling_app",
+// MySQL Connection Pool (localhost is a valid database host too)
+const dbHost = process.env.DB_HOST?.trim() || process.env.MYSQLHOST?.trim();
+const isLocalDbHost = ['localhost', '127.0.0.1', '::1'].includes((dbHost || '').toLowerCase());
+const isRailwayPrivateDbHost = (dbHost || '').toLowerCase().endsWith('.railway.internal');
+const dbSslSetting = process.env.DB_SSL?.trim().toLowerCase();
+const useDbSsl = dbSslSetting ? dbSslSetting === 'true' : !isLocalDbHost && !isRailwayPrivateDbHost;
+const configuredConnectionLimit = Number(process.env.DB_CONNECTION_LIMIT || 10);
+const dbConnectionLimit = Number.isInteger(configuredConnectionLimit) ? Math.max(2, Math.min(50, configuredConnectionLimit)) : 10;
+const dbPool = dbHost ? mysql.createPool({
+  host: dbHost,
+  port: Number(process.env.DB_PORT || process.env.MYSQLPORT || 3306),
+  user: process.env.DB_USER || process.env.MYSQLUSER || "root",
+  password: process.env.DB_PASSWORD || process.env.MYSQLPASSWORD || "",
+  database: process.env.DB_NAME || process.env.MYSQLDATABASE || "darling_app",
   waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-  ssl: (process.env.DB_HOST && process.env.DB_HOST !== "localhost" && process.env.DB_HOST !== "127.0.0.1") 
-    ? { rejectUnauthorized: false } 
-    : undefined
-});
+  connectionLimit: dbConnectionLimit,
+  queueLimit: 100,
+  ...(useDbSsl ? { ssl: { rejectUnauthorized: process.env.DB_SSL_REJECT_UNAUTHORIZED !== 'false' } } : {})
+}) : null;
+if (process.env.NODE_ENV === 'production' && !dbPool) {
+  throw new Error('Configure DB_HOST and database credentials before starting in production.');
+}
+
+const db = dbPool || {
+  execute: async (_sql: string, _params: any[] = []) => {
+      throw new Error("Database not configured");
+  }
+};
 
 // Mock database for when DB is not configured (to keep app working in preview)
 import fs from 'fs';
@@ -72,16 +96,16 @@ function saveMockDb() {
       users: mockUsers, 
       matches: mockMatches, 
       likes: mockLikes, 
-      messages: mockMessages,
-      swipes: mockSwipes
+      messages: mockMessages, 
+      swipes: mockSwipes,
     }));
   } catch(e){}
 }
-loadMockDb();
+if (process.env.NODE_ENV !== 'production') loadMockDb();
 
 // Pre-seed some mock users so they aren't lost immediately on restart
 (async () => {
-    if (mockUsers.length === 0) {
+    if (process.env.NODE_ENV !== 'production' && mockUsers.length === 0) {
         try {
            const hashed1 = await bcrypt.hash('123456', 10);
            mockUsers.push({ id: 1, email: 'test1@gmail.com', password: hashed1, profile_data: { name: 'Nam', gender: 'Nam', dob: '1995-05-15', bio: 'Mình là Nam ở HN' }});
@@ -90,7 +114,162 @@ loadMockDb();
         } catch(e) {}
     }
 })();
-const JWT_SECRET = process.env.JWT_SECRET || "your-super-secret-jwt-key";
+const configuredJwtSecret = process.env.JWT_SECRET?.trim();
+const isJwtSecretConfigured = !!configuredJwtSecret && configuredJwtSecret.length >= 32 && !/^(replace|change[-_ ]me)/i.test(configuredJwtSecret);
+if (process.env.NODE_ENV === 'production' && !isJwtSecretConfigured) {
+  throw new Error('Set JWT_SECRET to a random value of at least 32 characters in production.');
+}
+const JWT_SECRET = isJwtSecretConfigured ? configuredJwtSecret! : randomBytes(32).toString('hex');
+
+function createRateLimiter(windowMs: number, maxRequests: number, message: string) {
+  const buckets = new Map<string, { count: number; resetAt: number }>();
+  return (req: any, res: any, next: any) => {
+    const now = Date.now();
+    const key = String(req.ip || req.socket?.remoteAddress || 'unknown');
+    let bucket = buckets.get(key);
+    if (!bucket || bucket.resetAt <= now) {
+      bucket = { count: 0, resetAt: now + windowMs };
+      buckets.set(key, bucket);
+    }
+    if (bucket.count >= maxRequests) {
+      res.setHeader('Retry-After', String(Math.max(1, Math.ceil((bucket.resetAt - now) / 1000))));
+      return res.status(429).json({ success: false, error: message });
+    }
+    bucket.count += 1;
+    if (buckets.size > 10000) {
+      for (const [bucketKey, value] of buckets) if (value.resetAt <= now) buckets.delete(bucketKey);
+      while (buckets.size > 10000) {
+        const oldestKey = buckets.keys().next().value;
+        if (oldestKey === undefined) break;
+        buckets.delete(oldestKey);
+      }
+    }
+    return next();
+  };
+}
+
+function authenticateApiRequest(req: any, res: any, next: any) {
+  const publicPaths = new Set(['/api/auth/login', '/api/auth/register', '/api/health']);
+  const requestPath = String(req.originalUrl || '').split('?')[0];
+  if (publicPaths.has(requestPath)) return next();
+
+  const authorization = req.get('authorization') || '';
+  const token = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
+  if (!token) return res.status(401).json({ success: false, error: 'Vui lòng đăng nhập lại.' });
+
+  try {
+    const payload = jwt.verify(token, JWT_SECRET) as jwt.JwtPayload;
+    const userId = Number(payload.userId);
+    if (!Number.isSafeInteger(userId) || userId <= 0) {
+      return res.status(401).json({ success: false, error: 'Phiên đăng nhập không hợp lệ.' });
+    }
+    req.authUserId = userId;
+    return next();
+  } catch {
+    return res.status(401).json({ success: false, error: 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.' });
+  }
+}
+
+function requireOwnUserId(req: any, res: any, requestedUserId: unknown) {
+  if (Number(requestedUserId) !== Number(req.authUserId)) {
+    res.status(403).json({ success: false, error: 'Bạn không có quyền truy cập tài khoản này.' });
+    return false;
+  }
+  return true;
+}
+
+function requireOwnBodyField(field: string) {
+  return (req: any, res: any, next: any) => {
+    if (requireOwnUserId(req, res, req.body?.[field])) next();
+  };
+}
+
+async function requireAdmin(req: any, res: any, next: any) {
+  try {
+    const [rows]: any = await db.execute('SELECT is_admin FROM users WHERE id = ? LIMIT 1', [req.authUserId]);
+    if (!rows?.length || !rows[0].is_admin) {
+      return res.status(403).json({ success: false, error: 'Chá»‰ tĂ i khoáº£n quáº£n trá»‹ viĂªn má»›i Ä‘Æ°á»£c phĂ©p thá»±c hiá»‡n thao tĂ¡c nĂ y.' });
+    }
+    req.authIsAdmin = true;
+    return next();
+  } catch (error: any) {
+    console.error('Admin permission check failed:', error.code || error.message);
+    return res.status(503).json({ success: false, error: 'KhĂ´ng xĂ¡c minh Ä‘Æ°á»£c quyá»n quáº£n trá»‹.' });
+  }
+}
+
+async function hasActivePremium(userId: number): Promise<boolean> {
+  const [rows]: any = await db.execute('SELECT is_premium, premium_expires_at FROM users WHERE id = ? LIMIT 1', [userId]);
+  if (!rows?.length || !rows[0].is_premium) return false;
+  const expiry = rows[0].premium_expires_at;
+  if (expiry) {
+    const expiryTime = new Date(expiry).getTime();
+    if (Number.isFinite(expiryTime) && expiryTime <= Date.now()) {
+      await db.execute('UPDATE users SET is_premium = FALSE, premium_expires_at = NULL WHERE id = ?', [userId]);
+      return false;
+    }
+  }
+  return true;
+}
+
+type DailyFeature = 'like' | 'cupid';
+const fallbackDailyUsage = new Map<string, number>();
+
+function getVietnamUsageDate() {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(new Date());
+}
+
+async function consumeDailyUsage(userId: number, feature: DailyFeature, limit: number) {
+  const usageDate = getVietnamUsageDate();
+  const key = `${userId}:${usageDate}:${feature}`;
+  if (!dbPool) {
+    const used = fallbackDailyUsage.get(key) || 0;
+    if (used >= limit) return { allowed: false, used };
+    const next = used + 1;
+    fallbackDailyUsage.set(key, next);
+    return { allowed: true, used: next };
+  }
+
+  try {
+    await db.execute(
+      'INSERT IGNORE INTO daily_feature_usage (user_id, usage_date, feature, usage_count) VALUES (?, ?, ?, 0)',
+      [userId, usageDate, feature]
+    );
+    const [updateResult]: any = await db.execute(
+      'UPDATE daily_feature_usage SET usage_count = usage_count + 1 WHERE user_id = ? AND usage_date = ? AND feature = ? AND usage_count < ?',
+      [userId, usageDate, feature, limit]
+    );
+    const [rows]: any = await db.execute(
+      'SELECT usage_count FROM daily_feature_usage WHERE user_id = ? AND usage_date = ? AND feature = ? LIMIT 1',
+      [userId, usageDate, feature]
+    );
+    return { allowed: Number(updateResult?.affectedRows) === 1, used: Number(rows?.[0]?.usage_count || 0) };
+  } catch (error) {
+    if (process.env.NODE_ENV === 'production') throw error;
+    const used = fallbackDailyUsage.get(key) || 0;
+    if (used >= limit) return { allowed: false, used };
+    const next = used + 1;
+    fallbackDailyUsage.set(key, next);
+    return { allowed: true, used: next };
+  }
+}
+
+function createAuthResponse(user: any) {
+  const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '7d' });
+  return {
+    success: true,
+    token,
+    user: {
+      id: user.id,
+      email: user.email,
+      isAdmin: !!user.is_admin,
+      isPremium: !!user.is_premium,
+      profileData: user.profile_data || user.profileData
+    }
+  };
+}
 
 function normalizeSwipeAction(action: any): 'like' | 'pass' | null {
   if (!action) return null;
@@ -103,6 +282,23 @@ function normalizeSwipeAction(action: any): 'like' | 'pass' | null {
   return null;
 }
 
+function calculateDistanceKm(origin: any, destination: any): number | null {
+  const lat1 = Number(origin?.lat);
+  const lng1 = Number(origin?.lng);
+  const lat2 = Number(destination?.lat);
+  const lng2 = Number(destination?.lng);
+  if (![lat1, lng1, lat2, lng2].every(Number.isFinite)
+    || Math.abs(lat1) > 90 || Math.abs(lat2) > 90
+    || Math.abs(lng1) > 180 || Math.abs(lng2) > 180) return null;
+
+  const radians = (degrees: number) => degrees * Math.PI / 180;
+  const dLat = radians(lat2 - lat1);
+  const dLng = radians(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2
+    + Math.cos(radians(lat1)) * Math.cos(radians(lat2)) * Math.sin(dLng / 2) ** 2;
+  return Math.round(6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
+}
+
 async function startServer() {
   try {
     // Create base tables users and user_images first
@@ -112,7 +308,9 @@ async function startServer() {
         email VARCHAR(255) UNIQUE NOT NULL,
         password VARCHAR(255) NOT NULL,
         profile_data LONGTEXT,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        is_premium BOOLEAN NOT NULL DEFAULT FALSE,
+        is_admin BOOLEAN NOT NULL DEFAULT FALSE
       )
     `);
 
@@ -126,6 +324,35 @@ async function startServer() {
       )
     `);
 
+    // Add a server-owned premium flag; client-side UI state must never grant access.
+    try {
+      await db.execute("ALTER TABLE users ADD COLUMN is_premium BOOLEAN NOT NULL DEFAULT FALSE");
+    } catch (err: any) {
+      if (err.errno !== 1060 && !String(err.message || '').toLowerCase().includes('duplicate column')) throw err;
+    }
+
+    try {
+      await db.execute("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE");
+    } catch (err: any) {
+      if (err.errno !== 1060 && !String(err.message || '').toLowerCase().includes('duplicate column')) throw err;
+    }
+
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS advertisements (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        description TEXT,
+        image_url LONGTEXT NOT NULL,
+        target_url VARCHAR(2048) NOT NULL,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        priority INT NOT NULL DEFAULT 0,
+        starts_at DATETIME NULL,
+        ends_at DATETIME NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_advertisements_active (is_active, priority, starts_at, ends_at)
+      )
+    `);
+
     // Swipes (friend request/like)
     await db.execute(`
       CREATE TABLE IF NOT EXISTS swipes (
@@ -135,6 +362,26 @@ async function startServer() {
         action ENUM('like', 'pass') NOT NULL,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         UNIQUE(user_id, target_user_id)
+      )
+    `);
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS profile_impressions (
+        id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        target_user_id INT NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_profile_impression (user_id, target_user_id),
+        INDEX idx_profile_impressions_target (target_user_id)
+      )
+    `);
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS daily_feature_usage (
+        user_id INT NOT NULL,
+        usage_date DATE NOT NULL,
+        feature VARCHAR(32) NOT NULL,
+        usage_count INT UNSIGNED NOT NULL DEFAULT 0,
+        PRIMARY KEY (user_id, usage_date, feature),
+        INDEX idx_daily_usage_date (usage_date, feature)
       )
     `);
     await db.execute(`
@@ -156,6 +403,132 @@ async function startServer() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS moments (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        user_id BIGINT UNSIGNED NOT NULL,
+        image_url LONGTEXT NOT NULL,
+        caption VARCHAR(255) NULL,
+        audience ENUM('lover', 'friends', 'all', 'selected') NOT NULL DEFAULT 'friends',
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        INDEX idx_moments_created_at (created_at),
+        INDEX idx_moments_user_created (user_id, created_at)
+      )
+    `);
+    const [momentColumns]: any = await db.execute('SHOW COLUMNS FROM moments');
+    const momentColumnNames = new Set((momentColumns || []).map((column: any) => String(column.Field)));
+    if (!momentColumnNames.has('image_url')) {
+      await db.execute('ALTER TABLE moments ADD COLUMN image_url LONGTEXT NULL');
+      if (momentColumnNames.has('moment_data')) {
+        await db.execute(`UPDATE moments SET image_url = JSON_UNQUOTE(JSON_EXTRACT(moment_data, '$.imageUrl')) WHERE image_url IS NULL`);
+      }
+    } else {
+      // Widen the existing 1024-character URL column to support captured image data until object storage is configured.
+      await db.execute('ALTER TABLE moments MODIFY COLUMN image_url LONGTEXT NOT NULL');
+    }
+    if (!momentColumnNames.has('caption')) await db.execute('ALTER TABLE moments ADD COLUMN caption VARCHAR(255) NULL');
+    if (!momentColumnNames.has('audience')) await db.execute("ALTER TABLE moments ADD COLUMN audience ENUM('lover', 'friends', 'all', 'selected') NOT NULL DEFAULT 'friends'");
+    else await db.execute("ALTER TABLE moments MODIFY COLUMN audience ENUM('lover', 'friends', 'all', 'selected') NOT NULL DEFAULT 'friends'");
+    await db.execute('ALTER TABLE moments MODIFY COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT');
+    const getIndexes = async (table: string) => {
+      const [rows]: any = await db.execute(`SHOW INDEX FROM ${table}`);
+      const grouped = new Map<string, any[]>();
+      for (const row of rows || []) {
+        const name = String(row.Key_name || '');
+        grouped.set(name, [...(grouped.get(name) || []), row]);
+      }
+      return grouped;
+    };
+    const ensureIndex = async (table: string, name: string, columns: string, unique = false) => {
+      const wanted = columns.split(',').map(column => column.trim());
+      const groups = await getIndexes(table);
+      const alreadyCovered = [...groups.values()].some((items: any[]) => {
+        const sorted = [...items].sort((a, b) => Number(a.Seq_in_index) - Number(b.Seq_in_index));
+        const actual = sorted.map(row => String(row.Column_name));
+        return actual.length >= wanted.length
+          && wanted.every((column, index) => actual[index] === column)
+          && (!unique || (actual.length === wanted.length && Number(sorted[0]?.Non_unique) === 0));
+      });
+      if (alreadyCovered) return;
+      try { await db.execute(`CREATE ${unique ? 'UNIQUE ' : ''}INDEX ${name} ON ${table} (${columns})`); }
+      catch (err: any) { if (err.errno !== 1061 && !String(err.message || '').toLowerCase().includes('duplicate key name')) throw err; }
+    };
+    const dropIndexIfEquivalentExists = async (table: string, redundantName: string) => {
+      const groups = await getIndexes(table);
+      const redundant = groups.get(redundantName);
+      if (!redundant?.length) return;
+      const ordered = [...redundant].sort((a, b) => Number(a.Seq_in_index) - Number(b.Seq_in_index));
+      const columns = ordered.map(row => String(row.Column_name)).join(',');
+      const redundantIsUnique = Number(ordered[0]?.Non_unique) === 0;
+      const hasEquivalent = [...groups.entries()].some(([indexName, items]) => {
+        if (indexName === redundantName) return false;
+        const other = [...items].sort((a, b) => Number(a.Seq_in_index) - Number(b.Seq_in_index));
+        return other.map(row => String(row.Column_name)).join(',') === columns
+          && (!redundantIsUnique || Number(other[0]?.Non_unique) === 0);
+      });
+      if (hasEquivalent) await db.execute(`ALTER TABLE ${table} DROP INDEX ${redundantName}`);
+    };
+    await ensureIndex('moments', 'idx_moments_user_created', 'user_id, created_at');
+    await dropIndexIfEquivalentExists('moments', 'idx_moments_user_created');
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS moment_reactions (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        moment_id BIGINT UNSIGNED NOT NULL,
+        user_id BIGINT UNSIGNED NOT NULL,
+        reaction_type ENUM('heart', 'smile', 'surprised', 'sad') NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_moment_reaction (moment_id, user_id)
+      )
+    `);
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS moment_recipients (
+        moment_id BIGINT UNSIGNED NOT NULL,
+        user_id INT NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (moment_id, user_id),
+        INDEX idx_moment_recipients_user (user_id, moment_id)
+      )
+    `);
+    const reactionIndexesByName = await getIndexes('moment_reactions');
+    const hasUniqueMomentReaction = [...reactionIndexesByName.values()].some((indexes: any[]) => {
+      const ordered = [...indexes].sort((a, b) => Number(a.Seq_in_index) - Number(b.Seq_in_index));
+      return Number(ordered[0]?.Non_unique) === 0 && ordered.map(index => String(index.Column_name)).join(',') === 'moment_id,user_id';
+    });
+    if (!hasUniqueMomentReaction) {
+      // Keep the newest reaction if a legacy schema allowed duplicates before adding the constraint.
+      await db.execute(`DELETE older FROM moment_reactions older
+        INNER JOIN moment_reactions newer
+          ON newer.moment_id = older.moment_id AND newer.user_id = older.user_id AND newer.id > older.id`);
+      await ensureIndex('moment_reactions', 'unique_moment_reaction', 'moment_id, user_id', true);
+    }
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS friend_requests (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        sender_id INT NOT NULL,
+        receiver_id INT NOT NULL,
+        status ENUM('pending', 'accepted', 'rejected') NOT NULL DEFAULT 'pending',
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_friend_request_pair (sender_id, receiver_id),
+        INDEX idx_friend_requests_incoming (receiver_id, status, created_at),
+        INDEX idx_friend_requests_outgoing (sender_id, status, created_at)
+      )
+    `);
+
+    const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase();
+    const adminPassword = process.env.ADMIN_PASSWORD;
+    if (adminEmail && adminPassword) {
+      if (adminPassword.length < 16) throw new Error('ADMIN_PASSWORD must be at least 16 characters.');
+      const [adminRows]: any = await db.execute('SELECT id FROM users WHERE email = ? LIMIT 1', [adminEmail]);
+      if (adminRows?.length) {
+        await db.execute('UPDATE users SET is_admin = TRUE WHERE id = ?', [adminRows[0].id]);
+      } else {
+        const passwordHash = await bcrypt.hash(adminPassword, 12);
+        await db.execute('INSERT INTO users (email, password, is_admin) VALUES (?, ?, TRUE)', [adminEmail, passwordHash]);
+      }
+      console.log(`Administrator bootstrap is enabled for ${adminEmail}.`);
+    }
     try {
       await db.execute('ALTER TABLE messages MODIFY COLUMN text LONGTEXT');
     } catch(e) {}
@@ -163,7 +536,49 @@ async function startServer() {
       CREATE TABLE IF NOT EXISTS user_songs (
         user_id INT PRIMARY KEY,
         song_title VARCHAR(255),
-        song_data LONGTEXT
+        song_data LONGTEXT,
+        mime_type VARCHAR(100) NOT NULL DEFAULT 'audio/wav',
+        duration_seconds DECIMAL(5,2) NOT NULL DEFAULT 15.00
+      )
+    `);
+    const [songColumns]: any = await db.execute('SHOW COLUMNS FROM user_songs');
+    const songColumnNames = new Set((songColumns || []).map((column: any) => String(column.Field)));
+    if (!songColumnNames.has('mime_type')) await db.execute("ALTER TABLE user_songs ADD COLUMN mime_type VARCHAR(100) NOT NULL DEFAULT 'audio/wav'");
+    if (!songColumnNames.has('duration_seconds')) await db.execute('ALTER TABLE user_songs ADD COLUMN duration_seconds DECIMAL(5,2) NOT NULL DEFAULT 15.00');
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS subscriptions (
+        id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NOT NULL,
+        plan_name ENUM('Free', 'Gold', 'Premium') NOT NULL DEFAULT 'Premium',
+        expires_at DATETIME NOT NULL,
+        promo_code VARCHAR(64) NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE KEY unique_subscription_promo (user_id, promo_code),
+        INDEX idx_subscriptions_user_expiry (user_id, expires_at)
+      )
+    `);
+    const [subscriptionColumns]: any = await db.execute('SHOW COLUMNS FROM subscriptions');
+    const subscriptionColumnNames = new Set((subscriptionColumns || []).map((column: any) => String(column.Field)));
+    if (!subscriptionColumnNames.has('promo_code')) await db.execute('ALTER TABLE subscriptions ADD COLUMN promo_code VARCHAR(64) NULL');
+    await ensureIndex('subscriptions', 'idx_subscriptions_user_expiry', 'user_id, expires_at');
+    await ensureIndex('subscriptions', 'unique_subscription_promo', 'user_id, promo_code', true);
+    try {
+      await db.execute('ALTER TABLE users ADD COLUMN premium_expires_at DATETIME NULL');
+    } catch (err: any) {
+      if (err.errno !== 1060 && !String(err.message || '').toLowerCase().includes('duplicate column')) throw err;
+    }
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS interests (
+        id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(100) NOT NULL UNIQUE
+      )
+    `);
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS user_interests (
+        user_id INT NOT NULL,
+        interest_id INT NOT NULL,
+        PRIMARY KEY (user_id, interest_id),
+        INDEX idx_user_interests_interest (interest_id, user_id)
       )
     `);
     await db.execute(`
@@ -208,34 +623,236 @@ async function startServer() {
     // Dynamic Safe Database Index Initialization block to maximize query speeds
     const tryAddIndex = async (tableName: string, indexName: string, columns: string, isUnique = false) => {
       try {
-        const uniqueKeyword = isUnique ? "UNIQUE" : "";
-        await db.execute(`ALTER TABLE ${tableName} ADD ${uniqueKeyword} INDEX ${indexName} (${columns})`);
-        console.log(`Add beneficial index ${indexName} on table ${tableName} successfully.`);
+        await ensureIndex(tableName, indexName, columns, isUnique);
       } catch (err: any) {
-        if (err.errno === 1061 || err.message.includes("Duplicate key") || err.message.includes("already exists") || err.message.includes("Duplicate class ID")) {
-          // Index already exists
-        } else {
-          console.log(`Note: Could not add index ${indexName} on ${tableName} (perhaps table is missing or already indexed):`, err.message);
-        }
+        console.log(`Note: Could not ensure index ${indexName} on ${tableName}:`, err.message);
       }
     };
 
     await tryAddIndex("users", "idx_users_email", "email", true);
+    await dropIndexIfEquivalentExists('users', 'idx_users_email');
     await tryAddIndex("swipes", "idx_swipes_target_action", "target_user_id, action");
     await tryAddIndex("matches", "idx_matches_user2", "user2_id");
     await tryAddIndex("messages", "idx_messages_match_created", "match_id, created_at");
+    await tryAddIndex("messages", "idx_messages_match_id", "match_id, id");
     await tryAddIndex("user_images", "idx_user_images_user", "user_id");
 
   } catch (e: any) {
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error(`Database schema initialization failed: ${e.message || 'unknown error'}`);
+    }
     console.log("Note: Could not alter or create tables / indexes. Assuming it is ok or DB is not connected.", e.message);
   }
 
   const app = express();
   const PORT = process.env.PORT ? parseInt(process.env.PORT) : 3000;
 
-  app.use(express.json({ limit: '200mb' }));
-  app.use(express.urlencoded({ limit: '200mb', extended: true }));
-  app.use(cors());
+  app.disable('x-powered-by');
+  app.set('trust proxy', 1);
+  app.use(express.json({ limit: process.env.MAX_REQUEST_BODY || '32mb' }));
+  app.use(express.urlencoded({ limit: '2mb', extended: true, parameterLimit: 100 }));
+  const allowedOrigins = new Set((process.env.CORS_ORIGINS || '').split(',').map(origin => origin.trim()).filter(Boolean));
+  app.use(cors({
+    origin: (origin, callback) => {
+      if (!origin || allowedOrigins.has(origin)) return callback(null, true);
+      const localDevelopmentOrigin = process.env.NODE_ENV !== 'production' && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+      return callback(null, localDevelopmentOrigin);
+    },
+  }));
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('X-Frame-Options', 'DENY');
+    if (process.env.NODE_ENV === 'production') res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    next();
+  });
+  app.use('/api/auth/login', createRateLimiter(15 * 60 * 1000, 10, 'Quá nhiều lần đăng nhập. Hãy thử lại sau 15 phút.'));
+  app.use('/api/auth/register', createRateLimiter(60 * 60 * 1000, 5, 'Quá nhiều yêu cầu đăng ký. Hãy thử lại sau một giờ.'));
+  app.use('/api/chat/cupid', createRateLimiter(60 * 1000, 20, 'Bạn gửi yêu cầu quá nhanh. Vui lòng thử lại sau một phút.'));
+  app.use('/api/chat/darling', createRateLimiter(60 * 1000, 20, 'Bạn gửi yêu cầu quá nhanh. Vui lòng thử lại sau một phút.'));
+  app.use('/api', authenticateApiRequest);
+
+  app.get('/api/health', async (_req, res) => {
+    if (!dbPool) {
+      return res.status(503).json({ success: false, database: 'not_configured', message: 'DB_HOST chưa được cấu hình.' });
+    }
+    try {
+      await db.execute('SELECT 1');
+      return res.json({ success: true, database: 'connected' });
+    } catch (err: any) {
+      console.error('MySQL health check failed:', err.code || err.message);
+      return res.status(503).json({
+        success: false,
+        database: 'unavailable',
+        code: err.code || 'MYSQL_CONNECTION_ERROR',
+        message: 'Không kết nối được MySQL. Hãy kiểm tra MySQL Server, DB_NAME và quyền của tài khoản DB_USER.'
+      });
+    }
+  });
+
+  app.get('/api/advertisements/feed', async (req, res) => {
+    const userId = Number(req.authUserId);
+    try {
+      const [users]: any = await db.execute('SELECT id FROM users WHERE id = ? LIMIT 1', [userId]);
+      if (!users?.length) return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản.' });
+      const isPremium = await hasActivePremium(userId);
+      if (isPremium) return res.json({ success: true, isPremium: true, advertisements: [] });
+
+      const [advertisements]: any = await db.execute(
+        `SELECT id, title, description, image_url, target_url
+         FROM advertisements
+         WHERE is_active = TRUE
+           AND (starts_at IS NULL OR starts_at <= NOW())
+           AND (ends_at IS NULL OR ends_at >= NOW())
+         ORDER BY priority DESC, RAND()
+         LIMIT 30`
+      );
+      return res.json({ success: true, isPremium: false, advertisements });
+    } catch (err: any) {
+      console.error('Failed to load feed advertisements:', err.code || err.message || err);
+      if (dbPool) return res.status(503).json({ success: false, error: 'Không tải được quảng cáo từ MySQL.' });
+      const user = mockUsers.find((candidate: any) => Number(candidate.id) === userId);
+      return res.json({ success: true, isPremium: !!user?.is_premium, advertisements: [] });
+    }
+  });
+
+  app.post('/api/premium/redeem-trial', async (req, res) => {
+    const userId = Number(req.authUserId);
+    const code = String(req.body?.code || '').trim();
+    if (code !== '250745') return res.status(400).json({ success: false, error: 'Mã dùng thử không hợp lệ.' });
+    let connection: any;
+    try {
+      if (!dbPool) return res.status(503).json({ success: false, error: 'Chưa kết nối được cơ sở dữ liệu.' });
+      connection = await dbPool.getConnection();
+      await connection.beginTransaction();
+      const [users]: any = await connection.execute('SELECT is_premium, premium_expires_at FROM users WHERE id = ? FOR UPDATE', [userId]);
+      if (!users?.length) {
+        await connection.rollback();
+        return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản.' });
+      }
+      const [redemptions]: any = await connection.execute('SELECT id FROM subscriptions WHERE user_id = ? AND promo_code = ? LIMIT 1', [userId, code]);
+      if (redemptions?.length) {
+        await connection.rollback();
+        return res.status(409).json({ success: false, error: 'Mỗi tài khoản chỉ được sử dụng mã này một lần.' });
+      }
+      const expiresAt = users[0].premium_expires_at ? new Date(users[0].premium_expires_at).getTime() : NaN;
+      if (users[0].is_premium && (!Number.isFinite(expiresAt) || expiresAt > Date.now())) {
+        await connection.rollback();
+        return res.status(409).json({ success: false, error: 'Tài khoản của bạn đã có Premium đang hoạt động.' });
+      }
+      const [insertResult]: any = await connection.execute(
+        "INSERT INTO subscriptions (user_id, plan_name, expires_at, promo_code) VALUES (?, 'Premium', DATE_ADD(NOW(), INTERVAL 7 DAY), ?)",
+        [userId, code]
+      );
+      await connection.execute('UPDATE users SET is_premium = TRUE, premium_expires_at = DATE_ADD(NOW(), INTERVAL 7 DAY) WHERE id = ?', [userId]);
+      const [subscriptionRows]: any = await connection.execute('SELECT expires_at FROM subscriptions WHERE id = ? LIMIT 1', [insertResult.insertId]);
+      await connection.commit();
+      return res.json({ success: true, expiresAt: subscriptionRows?.[0]?.expires_at || null, durationDays: 7 });
+    } catch (error: any) {
+      if (connection) await connection.rollback().catch(() => {});
+      console.error('Could not redeem Premium trial:', error.code || error.message);
+      return res.status(503).json({ success: false, error: 'Không kích hoạt được mã dùng thử lúc này.' });
+    } finally {
+      connection?.release();
+    }
+  });
+
+  app.get('/api/admin/session', requireAdmin, (_req, res) => res.json({ success: true, isAdmin: true }));
+  app.get('/api/admin/advertisements', requireAdmin, async (_req, res) => {
+    try {
+      const [rows]: any = await db.execute('SELECT id, title, description, image_url, target_url, is_active, priority, starts_at, ends_at, created_at FROM advertisements ORDER BY priority DESC, created_at DESC');
+      return res.json({ success: true, data: rows });
+    } catch (error: any) {
+      console.error('Could not list advertisements:', error.code || error.message);
+      return res.status(503).json({ success: false, error: 'KhĂ´ng táº£i Ä‘Æ°á»£c quáº£ng cĂ¡o.' });
+    }
+  });
+
+  const validateAdvertisement = (body: any) => {
+    const title = String(body?.title || '').trim();
+    const imageUrl = String(body?.image_url || '').trim();
+    const targetUrl = String(body?.target_url || '').trim();
+    const validUrl = (value: string) => {
+      try { const url = new URL(value); return url.protocol === 'https:' || url.protocol === 'http:'; }
+      catch { return false; }
+    };
+    if (!title || title.length > 255 || !imageUrl || imageUrl.length > 20_000_000 || !validUrl(targetUrl)) return null;
+    if (!/^(https?:\/\/|data:image\/(png|jpeg|webp|gif);base64,)/i.test(imageUrl)) return null;
+    return {
+      title,
+      description: String(body?.description || '').trim().slice(0, 5000) || null,
+      imageUrl,
+      targetUrl,
+      isActive: body?.is_active === false || body?.is_active === 0 ? 0 : 1,
+      priority: Math.max(-1000, Math.min(1000, Number.parseInt(body?.priority, 10) || 0)),
+      startsAt: body?.starts_at || null,
+      endsAt: body?.ends_at || null,
+    };
+  };
+
+  app.post('/api/admin/advertisements', requireAdmin, async (req, res) => {
+    const ad = validateAdvertisement(req.body);
+    if (!ad) return res.status(400).json({ success: false, error: 'Kiá»ƒm tra tiÃªu Ä‘á», hÃ¬nh áº£nh vÃ  Ä‘Æ°á»ng dáº«n HTTP/HTTPS.' });
+    try {
+      const [result]: any = await db.execute('INSERT INTO advertisements (title, description, image_url, target_url, is_active, priority, starts_at, ends_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [ad.title, ad.description, ad.imageUrl, ad.targetUrl, ad.isActive, ad.priority, ad.startsAt, ad.endsAt]);
+      return res.status(201).json({ success: true, id: result.insertId });
+    } catch (error: any) {
+      console.error('Could not create advertisement:', error.code || error.message);
+      return res.status(503).json({ success: false, error: 'KhÃ´ng lÆ°u Ä‘Æ°á»£c quáº£ng cÃ¡o.' });
+    }
+  });
+
+  app.put('/api/admin/advertisements/:id', requireAdmin, async (req, res) => {
+    const ad = validateAdvertisement(req.body);
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0 || !ad) return res.status(400).json({ success: false, error: 'ThÃ´ng tin quáº£ng cÃ¡o khÃ´ng há»£p lá»‡.' });
+    try {
+      const [result]: any = await db.execute('UPDATE advertisements SET title = ?, description = ?, image_url = ?, target_url = ?, is_active = ?, priority = ?, starts_at = ?, ends_at = ? WHERE id = ?', [ad.title, ad.description, ad.imageUrl, ad.targetUrl, ad.isActive, ad.priority, ad.startsAt, ad.endsAt, id]);
+      if (!result.affectedRows) return res.status(404).json({ success: false, error: 'KhÃ´ng tÃ¬m tháº¥y quáº£ng cÃ¡o.' });
+      return res.json({ success: true });
+    } catch (error: any) {
+      console.error('Could not update advertisement:', error.code || error.message);
+      return res.status(503).json({ success: false, error: 'KhÃ´ng cáº­p nháº­t Ä‘Æ°á»£c quáº£ng cÃ¡o.' });
+    }
+  });
+
+  app.delete('/api/admin/advertisements/:id', requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ success: false, error: 'MÃ£ quáº£ng cÃ¡o khÃ´ng há»£p lá»‡.' });
+    try {
+      const [result]: any = await db.execute('DELETE FROM advertisements WHERE id = ?', [id]);
+      if (!result.affectedRows) return res.status(404).json({ success: false, error: 'KhÃ´ng tÃ¬m tháº¥y quáº£ng cÃ¡o.' });
+      return res.json({ success: true });
+    } catch (error: any) {
+      console.error('Could not delete advertisement:', error.code || error.message);
+      return res.status(503).json({ success: false, error: 'KhÃ´ng xÃ³a Ä‘Æ°á»£c quáº£ng cÃ¡o.' });
+    }
+  });
+
+  app.get('/api/admin/users', requireAdmin, async (req, res) => {
+    const search = String(req.query.search || '').trim().slice(0, 100);
+    try {
+      const [rows]: any = await db.execute('SELECT id, email, is_premium, is_admin, created_at FROM users WHERE email LIKE ? ORDER BY created_at DESC LIMIT 100', [`%${search}%`]);
+      return res.json({ success: true, data: rows });
+    } catch (error: any) {
+      console.error('Could not list admin users:', error.code || error.message);
+      return res.status(503).json({ success: false, error: 'KhÃ´ng táº£i Ä‘Æ°á»£c tÃ i khoáº£n.' });
+    }
+  });
+
+  app.patch('/api/admin/users/:id', requireAdmin, async (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0 || id === Number(req.authUserId)) return res.status(400).json({ success: false, error: 'KhÃ´ng thá»ƒ thay Ä‘á»•i vai trÃ² cá»§a chÃ­nh tÃ i khoáº£n quáº£n trá»‹.' });
+    if (typeof req.body?.is_premium !== 'boolean' || typeof req.body?.is_admin !== 'boolean') return res.status(400).json({ success: false, error: 'Thiáº¿u tráº¡ng thÃ¡i premium hoáº·c admin.' });
+    try {
+      const [result]: any = await db.execute('UPDATE users SET is_premium = ?, is_admin = ?, premium_expires_at = NULL WHERE id = ?', [req.body.is_premium, req.body.is_admin, id]);
+      if (!result.affectedRows) return res.status(404).json({ success: false, error: 'KhÃ´ng tÃ¬m tháº¥y tÃ i khoáº£n.' });
+      return res.json({ success: true });
+    } catch (error: any) {
+      console.error('Could not update account roles:', error.code || error.message);
+      return res.status(503).json({ success: false, error: 'KhÃ´ng cáº­p nháº­t Ä‘Æ°á»£c tÃ i khoáº£n.' });
+    }
+  });
 
   // API Routes FIRST
 
@@ -249,6 +866,7 @@ async function startServer() {
       }
       
       email = email.trim().toLowerCase();
+      if (String(password).length < 8) return res.status(400).json({ error: 'Mật khẩu cần có ít nhất 8 ký tự.' });
       const hashedPassword = await bcrypt.hash(password, 10);
       
       try {
@@ -257,16 +875,22 @@ async function startServer() {
           "INSERT INTO users (email, password) VALUES (?, ?)", 
           [email, hashedPassword]
         );
-        return res.json({ success: true, userId: (result as any).insertId });
+        const userId = Number((result as any).insertId);
+        if (!Number.isSafeInteger(userId) || userId <= 0) throw new Error('Database did not return a valid user id');
+        return res.json(createAuthResponse({ id: userId, email }));
       } catch (err: any) {
+        if (err?.code === 'ER_DUP_ENTRY' || err?.errno === 1062) return res.status(409).json({ error: 'Email đã tồn tại.' });
+        if (process.env.NODE_ENV === 'production') return res.status(503).json({ error: 'Database is temporarily unavailable.' });
         // Fallback to mock memory storage if DB connection fails
         console.warn("DB not connected, using memory mock:", err.message);
         if (mockUsers.find(u => u.email === email)) {
             return res.status(400).json({ error: "Email đã tồn tại" });
         }
-        mockUsers.push({ id: mockUsers.length + 1, email, password: hashedPassword });
+        const userId = mockUsers.reduce((max, user) => Math.max(max, Number(user.id) || 0), 0) + 1;
+        const user = { id: userId, email, password: hashedPassword };
+        mockUsers.push(user);
         saveMockDb();
-        return res.json({ success: true, userId: mockUsers.length });
+        return res.json(createAuthResponse(user));
       }
     } catch (e) {
       console.error(e);
@@ -278,7 +902,9 @@ async function startServer() {
   app.put("/api/users/profile/:userId", async (req, res) => {
     try {
        const userId = req.params.userId;
+       if (!requireOwnUserId(req, res, userId)) return;
        const { profileData } = req.body;
+       if (!profileData || typeof profileData !== 'object') return res.status(400).json({ error: 'Dữ liệu hồ sơ không hợp lệ.' });
        const profileJson = JSON.stringify(profileData);
        try {
            await db.execute(
@@ -317,14 +943,17 @@ async function startServer() {
   app.get("/api/users/profile/:userId", async (req, res) => {
     try {
       const userId = req.params.userId;
+      if (!requireOwnUserId(req, res, userId)) return;
       try {
-        const [rows]: any = await db.execute("SELECT id, email, profile_data FROM users WHERE id = ?", [userId]);
+        const [rows]: any = await db.execute("SELECT id, email, profile_data, is_admin, is_premium FROM users WHERE id = ?", [userId]);
         if (rows && rows.length > 0) {
            let profileData = rows[0].profile_data;
            if (typeof profileData === 'string') {
                try { profileData = JSON.parse(profileData); } catch(e){}
            }
            if (!profileData) profileData = {};
+           profileData.isAdmin = !!rows[0].is_admin;
+           profileData.isPremium = await hasActivePremium(Number(userId));
            
            // Fetch user images too
            const [imgRows]: any = await db.execute("SELECT image_url FROM user_images WHERE user_id = ?", [userId]);
@@ -371,6 +1000,7 @@ async function startServer() {
   app.get("/api/user_preferences/:userId", async (req, res) => {
     try {
       const userId = req.params.userId;
+      if (!requireOwnUserId(req, res, userId)) return;
       try {
         const [rows]: any = await db.execute(
           "SELECT min_age, max_age, max_distance_km, search_gender, is_distance_flexible, is_age_flexible, location, active_priorities FROM user_preferences WHERE user_id = ?",
@@ -432,6 +1062,7 @@ async function startServer() {
   app.post("/api/user_preferences/:userId", async (req, res) => {
     try {
       const userId = req.params.userId;
+      if (!requireOwnUserId(req, res, userId)) return;
       const { preferences } = req.body;
       if (!preferences) {
         return res.status(400).json({ success: false, error: "Thiếu dữ liệu bộ lọc" });
@@ -496,6 +1127,7 @@ async function startServer() {
   app.delete("/api/users/:userId", async (req, res) => {
     try {
       const userId = req.params.userId;
+      if (!requireOwnUserId(req, res, userId)) return;
       try {
         await db.execute("DELETE FROM messages WHERE sender_id = ? OR match_id IN (SELECT id FROM matches WHERE user1_id = ? OR user2_id = ?)", [userId, userId, userId]);
         await db.execute("DELETE FROM matches WHERE user1_id = ? OR user2_id = ?", [userId, userId]);
@@ -520,42 +1152,26 @@ async function startServer() {
   // Setup profile / complete registration
   app.post("/api/users/profile", async (req, res) => {
     try {
-       const { email, profileData } = req.body; 
-       
+       const { profileData } = req.body;
+       const userId = Number(req.authUserId);
+       if (!profileData || typeof profileData !== 'object') return res.status(400).json({ error: 'Dữ liệu hồ sơ không hợp lệ.' });
        const profileJson = JSON.stringify(profileData);
        try {
-           if (email) {
-               await db.execute(
-                   "UPDATE users SET profile_data = ? WHERE email = ?",
-                   [profileJson, email]
-               );
-           }
-           
-           const [userRows]: any = await db.execute("SELECT id FROM users WHERE email = ?", [email]);
-           if (userRows && userRows.length > 0) {
-               const userId = userRows[0].id;
-               if (profileData.images && Array.isArray(profileData.images)) {
-                  try {
-                      await db.execute("DELETE FROM user_images WHERE user_id = ?", [userId]);
-                      for (const img of profileData.images) {
-                          if (img) {
-                              await db.execute("INSERT INTO user_images (user_id, image_url) VALUES (?, ?)", [userId, img]);
-                          }
-                      }
-                  } catch (imgErr) {
-                      console.warn("Could not write to user_images table:", imgErr);
-                  }
-               }
-           }
-           
-           return res.json({ success: true });
-       } catch (err: any) {
-           console.warn("DB not connected, using memory mock:", err.message);
-           const user = mockUsers.find(u => u.email === email);
-           if (user) {
-               user.profile_data = profileData; saveMockDb();
-           }
-           return res.json({ success: true });
+            await db.execute("UPDATE users SET profile_data = ? WHERE id = ?", [profileJson, userId]);
+            if (profileData.images && Array.isArray(profileData.images)) {
+              await db.execute("DELETE FROM user_images WHERE user_id = ?", [userId]);
+              for (const img of profileData.images) {
+                if (img) await db.execute("INSERT INTO user_images (user_id, image_url) VALUES (?, ?)", [userId, img]);
+              }
+            }
+            return res.json({ success: true });
+        } catch (err: any) {
+            console.warn("DB not connected, using memory mock:", err.message);
+            const user = mockUsers.find(u => Number(u.id) === userId);
+            if (!user) return res.status(404).json({ success: false, error: 'Không tìm thấy tài khoản.' });
+            user.profile_data = profileData;
+            saveMockDb();
+            return res.json({ success: true });
        }
     } catch (e) {
        console.error(e);
@@ -568,37 +1184,39 @@ async function startServer() {
     try {
       const { oldEmail, newEmail, password } = req.body;
       if (!oldEmail || !newEmail || !password) return res.status(400).json({ error: "Thiếu thông tin" });
+      const cleanNewEmail = String(newEmail).trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanNewEmail)) return res.status(400).json({ error: 'Email mới không hợp lệ.' });
 
       try {
-        const [rows]: any = await db.execute("SELECT id, password FROM users WHERE email = ?", [oldEmail]);
+        const [rows]: any = await db.execute("SELECT id, password FROM users WHERE id = ?", [req.authUserId]);
         if (rows.length === 0) return res.status(404).json({ error: "Không tìm thấy người dùng" });
 
         const user = rows[0];
         const match = await bcrypt.compare(password, user.password);
-        if (!match && user.password !== password) {
+        if (!match) {
              return res.status(400).json({ error: "Mật khẩu không chính xác" });
         }
 
         // Check if new email is in use
-        const [existingEmails]: any = await db.execute("SELECT id FROM users WHERE email = ?", [newEmail]);
+        const [existingEmails]: any = await db.execute("SELECT id FROM users WHERE email = ? AND id <> ?", [cleanNewEmail, req.authUserId]);
         if (existingEmails.length > 0) return res.status(400).json({ error: "Email này đã được sử dụng" });
 
-        await db.execute("UPDATE users SET email = ? WHERE email = ?", [newEmail, oldEmail]);
+        await db.execute("UPDATE users SET email = ? WHERE id = ?", [cleanNewEmail, req.authUserId]);
         return res.json({ success: true });
       } catch (err: any) {
         console.warn("DB error:", err.message);
-        const user = mockUsers.find(u => u.email === oldEmail);
+        const user = mockUsers.find(u => Number(u.id) === Number(req.authUserId));
         if (!user) return res.status(404).json({ error: "Không tìm thấy người dùng (Mock)" });
 
         const match = await bcrypt.compare(password, user.password);
-        if (!match && user.password !== password) {
+        if (!match) {
              return res.status(400).json({ error: "Mật khẩu không chính xác" });
         }
         
-        const existing = mockUsers.find(u => u.email === newEmail);
+        const existing = mockUsers.find(u => u.email === cleanNewEmail && Number(u.id) !== Number(req.authUserId));
         if (existing) return res.status(400).json({ error: "Email này đã được sử dụng (Mock)" });
 
-        user.email = newEmail; saveMockDb();
+        user.email = cleanNewEmail; saveMockDb();
         return res.json({ success: true });
       }
     } catch (e) {
@@ -611,35 +1229,28 @@ async function startServer() {
   app.post("/api/auth/change-password", async (req, res) => {
     try {
       const { email, oldPassword, newPassword } = req.body;
-      if (!email || !newPassword) return res.status(400).json({ error: "Thiếu thông tin" });
+      if (!email || !oldPassword || !newPassword) return res.status(400).json({ error: 'Nhập mật khẩu hiện tại và mật khẩu mới.' });
 
+      if (String(newPassword).length < 8) return res.status(400).json({ error: 'Mật khẩu mới cần có ít nhất 8 ký tự.' });
       const hashedNewPassword = await bcrypt.hash(newPassword, 10);
 
       try {
-        const [rows]: any = await db.execute("SELECT id, password FROM users WHERE email = ?", [email]);
+        const [rows]: any = await db.execute("SELECT id, password FROM users WHERE id = ?", [req.authUserId]);
         if (rows.length === 0) return res.status(404).json({ error: "Không tìm thấy người dùng" });
 
         const user = rows[0];
-        if (oldPassword) {
-            const match = await bcrypt.compare(oldPassword, user.password);
-            if (!match && user.password !== oldPassword) {
-                return res.status(400).json({ error: "Mật khẩu cũ không chính xác" });
-            }
-        }
+        const match = await bcrypt.compare(oldPassword, user.password);
+        if (!match) return res.status(400).json({ error: "Mật khẩu cũ không chính xác" });
 
-        await db.execute("UPDATE users SET password = ? WHERE email = ?", [hashedNewPassword, email]);
+        await db.execute("UPDATE users SET password = ? WHERE id = ?", [hashedNewPassword, req.authUserId]);
         return res.json({ success: true });
       } catch (err: any) {
         console.warn("DB error:", err.message);
-        const user = mockUsers.find(u => u.email === email);
+        const user = mockUsers.find(u => Number(u.id) === Number(req.authUserId));
         if (!user) return res.status(404).json({ error: "Không tìm thấy người dùng (Mock)" });
 
-        if (oldPassword) {
-            const match = await bcrypt.compare(oldPassword, user.password);
-            if (!match && user.password !== oldPassword) {
-                return res.status(400).json({ error: "Mật khẩu cũ không chính xác" });
-            }
-        }
+        const match = await bcrypt.compare(oldPassword, user.password);
+        if (!match) return res.status(400).json({ error: "Mật khẩu cũ không chính xác" });
         user.password = hashedNewPassword; saveMockDb();
         return res.json({ success: true });
       }
@@ -660,6 +1271,7 @@ async function startServer() {
           const [rows]: any = await db.execute("SELECT * FROM users WHERE email = ?", [email]);
           user = rows[0];
       } catch (err: any) {
+          if (process.env.NODE_ENV === 'production') return res.status(503).json({ error: 'Database is temporarily unavailable.' });
           console.warn("DB not connected, using memory mock:", err.message);
           user = mockUsers.find(u => u.email === email);
       }
@@ -669,236 +1281,586 @@ async function startServer() {
       }
 
       const match = await bcrypt.compare(password, user.password);
-      if (!match && password !== user.password) {
+      if (!match) {
          return res.status(401).json({ error: "Sai email hoặc mật khẩu" });
       }
 
-      const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '7d' });
-      res.json({ success: true, token, user: { id: user.id, email: user.email, profileData: user.profile_data || user.profileData }});
+       res.json(createAuthResponse(user));
     } catch (e) {
       console.error(e);
       res.status(500).json({ error: "Lỗi Server" });
     }
   });
 
-  // Darling AI Chat logic
-  app.post("/api/chat/darling", async (req, res) => {
-    const { messages } = req.body;
+  // Cupid AI System Instruction & Persona
+  const CUPID_SYSTEM_INSTRUCTION = `# Role (Vai trò)
+Bạn là "Cupid AI" - một chuyên gia tư vấn tâm lý tình yêu, tình bạn, giao tiếp lứa đôi và thấu cảm cảm xúc hàng đầu, kết hợp đồng thời với sự uyên bác về Tarot, Chiêm tinh học (12 cung hoàng đạo), Tử vi và 12 con giáp. Bạn là người bạn đồng hành ấm áp, sâu sắc, tinh tế và không phán xét.
+
+# Chuyên môn chuyên sâu theo các chủ đề:
+1. Tình yêu & Hẹn hò: Bắt chuyện tinh tế, giải mã tâm lý đối phương, đọc vị các "cờ xanh" (green flags) và "cờ đỏ" (red flags), xây dựng tình yêu bền vững.
+2. Tình bạn & Tri kỷ: Gỡ rối bất đồng bạn bè, ranh giới bạn bè khác giới, xử lý khi lỡ thích bạn thân (crush bạn thân), làm lành sau rạn nứt, thích nghi khi bạn thân có người yêu.
+3. Gợi ý quà tặng: Gợi ý các món quà sâu sắc theo tính cách, sở thích, cung hoàng đạo, các dịp kỷ niệm (sinh nhật, 100 ngày, 1 năm, Valentine, 8/3, 20/10, Giáng sinh), quà trải nghiệm và quà tinh tế.
+4. Thơ ca & Thả thính: Sáng tác thơ lãng mạn (thơ 4 câu, lục bát, 7 chữ, thơ đối đáp), câu thả thính ngọt ngào, tinh tế hoặc dí dỏm, văn phong bay bổng lay động trái tim.
+5. Những chuyện có thể xảy ra trong các mối quan hệ:
+   - Yêu xa (LDR): Xây dựng niềm tin, thắp lửa cảm xúc, vượt qua khoảng cách và nỗi cô đơn.
+   - Chiến tranh lạnh & Cãi vã: Kỹ năng hạ cái tôi, giải quyết mâu thuẫn mang tính xây dựng, nghệ thuật làm hòa và mẫu tin nhắn "xuống thang" ngọt ngào.
+   - Ghen tuông & Bất an (Overthinking): Nhận diện nỗi sợ tiềm thức, giao tiếp ranh giới lành mạnh mà không kiểm soát.
+   - Đối phương lạnh nhạt / Rep chậm: Giữ vững giá trị bản thân, lùi lại đúng lúc để tái tạo sự hấp dẫn tự nhiên.
+   - Mối quan hệ mập mờ (Situationship): Đối thoại thẳng thắn xác định cam kết, thoát khỏi vùng mập mờ gây tổn thương.
+   - Người yêu cũ (Ex) & Chữa lành (Healing): Buông bỏ quá khứ, chữa lành đứa trẻ bên trong, đánh giá sáng suốt nếu có ý định quay lại.
+   - Áp lực từ gia đình & Định kiến xã hội: Đồng lòng cùng người thương, khéo léo chứng minh tình cảm chân thành.
+
+# Nguyên tắc Nhận diện Ngữ cảnh & Đọc kỹ Tin nhắn
+- Đọc kỹ TOÀN BỘ lịch sử đoạn chat từ đầu đến cuối: Nhận diện rõ đối tượng được nhắc đến (crush, người yêu, người cũ, bạn thân, bạn gái/bạn trai...), tính cách, cung hoàng đạo, con giáp, địa điểm, sự việc cụ thể đã diễn ra ở các lượt tin nhắn trước.
+- Tuyệt đối không trả lời rời rạc hay quên ngữ cảnh trước đó. Mọi câu trả lời tiếp theo phải liền mạch, kế thừa và phản ánh đúng diễn biến câu chuyện của người dùng.
+- Đọc kỹ tin nhắn mới nhất, suy nghĩ thấu đáo về tâm lý, cảm xúc ẩn sau câu chữ rồi mới đưa ra lời khuyên thực tế, sâu sắc.
+
+# Tìm kiếm & Đưa Dữ liệu Mạng vào Câu trả lời (Web Search Grounding)
+- Khi câu hỏi của người dùng cần dữ liệu đời thực trên mạng (như: địa điểm hẹn hò, quán cafe, nhà hàng ở một thành phố/quận cụ thể, gợi ý quà tặng thịnh hành, bài hát tỏ tình hay, sự kiện/ngày lễ tình yêu, phong tục hoặc thông tin thời điểm hiện nay...):
+- BẮT BUỘC: Tìm kiếm đúng dữ liệu trên mạng và đưa các thông tin/địa điểm/gợi ý cụ thể, chính xác, cập nhật vào câu trả lời, không trả lời chung chung mơ hồ.
+
+# Tone of Voice & Phong cách phản hồi
+- Trả lời ĐÚNG TRỌNG TÂM câu hỏi của người dùng: Trả lời tự nhiên, khách quan, chân thành, nhẹ nhàng nhưng sắc sảo và thực tế.
+- TUYỆT ĐỐI KHÔNG dùng cấu trúc 4 bước dập khuôn hay đánh số máy móc (như "1. Thấu cảm & Đồng điệu", "2. Góc nhìn đa chiều", "3. Lời khuyên & Giải pháp", "4. Gợi ý mở rộng"). Trả lời liền mạch, tự nhiên như một chuyên gia tâm lý thực thụ.
+- Khách quan, trung lập, không phán xét, không cổ súy cho hành vi thao túng tâm lý (toxic) hay phá hoại mối quan hệ lành mạnh.
+- Đưa ra lời khuyên hành động cụ thể (Actionable advice), có thể kèm mẫu tin nhắn (script) tự nhiên nếu phù hợp.
+
+# QUY TẮC VỀ CHỦ ĐỀ NGOÀI PHẠM VI (OUT OF SCOPE):
+- Bạn CHỈ chuyên về tư vấn tình cảm, tâm lý lứa đôi, kỹ năng giao tiếp trong tình yêu, cùng với Tarot, Chiêm tinh và Tử vi con giáp hỗ trợ tình cảm.
+- Với BẤT KỲ chủ đề nào khác nằm NGOÀI phạm vi này (như lập trình máy tính, giải toán, bài tập học thuật, chính trị, tin tức thời sự, kinh tế - chứng khoán - crypto, y tế bệnh lý, kỹ thuật xe cộ, v.v.):
+  => BẮT BUỘC ghi rõ là KHÔNG BIẾT và vấn đề này nằm ngoài chuyên môn của bạn một cách lịch sự, nhã nhặn.
+  => MỜI người dùng đặt câu hỏi khác liên quan đến chuyện tình cảm, tâm sự người yêu/crush, hoặc quẻ bài Tarot và độ hợp cung hoàng đạo/con giáp.`;
+
+  // Live Web Search Retriever for Real-World Data (Places, Cafes, Gifts, Trends, Facts)
+  async function searchWebForData(query: string): Promise<{ title: string; snippet: string; source?: string }[]> {
+    const results: { title: string; snippet: string; source?: string }[] = [];
+    
+    // 1. Google News RSS for live Vietnamese topics, places, cafes, dating trends
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3500);
+      const gUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=vi&gl=VN&ceid=VN:vi`;
+      const res = await fetch(gUrl, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.ok) {
+        const xml = await res.text();
+        const items = [...xml.matchAll(/<item>[\s\S]*?<title>([\s\S]*?)<\/title>[\s\S]*?<link>([\s\S]*?)<\/link>[\s\S]*?<\/item>/g)];
+        for (const item of items.slice(0, 5)) {
+          const title = item[1].replace(/<!\[CDATA\[|\]\]>/g, '').replace(/<[^>]+>/g, '').trim();
+          if (title && !results.some(r => r.title === title)) {
+            results.push({ title, snippet: title, source: 'Dữ liệu trực tuyến' });
+          }
+        }
+      }
+    } catch(e) {}
+
+    // 2. Wikipedia search API for encyclopedic, astrological, psychological terms
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2500);
+      const wUrl = `https://vi.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json`;
+      const res = await fetch(wUrl, { signal: controller.signal });
+      clearTimeout(timeout);
+      if (res.ok) {
+        const data = await res.json();
+        if (data?.query?.search) {
+          for (const s of data.query.search.slice(0, 3)) {
+            const title = s.title;
+            const snippet = (s.snippet || '').replace(/<[^>]+>/g, '').trim();
+            if (title && snippet && !results.some(r => r.title === title)) {
+              results.push({ title, snippet, source: 'Bách khoa toàn thư' });
+            }
+          }
+        }
+      }
+    } catch(e) {}
+
+    return results;
+  }
+
+  // Deep Contextual Reasoning & Response Generator
+  // Deep Contextual Reasoning & Response Generator with User Profile Integration
+  async function generateContextualCupidResponse(msgs: any[], userProfile?: any): Promise<string> {
+    const userMessages = msgs.filter(m => m.role === 'user');
+    const lastUserMsgObj = userMessages[userMessages.length - 1];
+    const userText = (lastUserMsgObj?.parts?.[0]?.text || "").trim();
+    const lowerUserText = userText.toLowerCase();
+
+    // Check if the query is outside Cupid AI's scope
+    const outOfScopeKeywords = [
+      "lập trình", "viết code", "source code", "javascript", "python", "typescript", "html", "css", "react", "c++", "java", "php", "sql", "bug", "terminal", "npm", "docker", "thuật toán",
+      "giải toán", "phương trình", "tích phân", "đạo hàm", "vật lý", "hóa học", "bài tập về nhà", "sinh học",
+      "chính trị", "bầu cử", "đảng", "quốc hội", "chính phủ", "chiến tranh", "luật dân sự", "luật hình sự",
+      "chứng khoán", "cổ phiếu", "bitcoin", "crypto", "tiền ảo", "lãi suất", "forex", "bất động sản",
+      "chẩn đoán bệnh", "kê đơn thuốc", "thuốc kháng sinh", "ung thư", "triệu chứng bệnh",
+      "thời tiết ngày mai", "dự báo thời tiết", "kết quả bóng đá", "sửa xe", "mã nguồn"
+    ];
+
+    if (outOfScopeKeywords.some(kw => lowerUserText.includes(kw))) {
+      return `Rất tiếc, mình là Cupid AI - chuyên gia tư vấn tình cảm và tâm lý lứa đôi. Chủ đề này nằm ngoài phạm vi kiến thức của mình nên mình không biết câu trả lời rồi.\n\nBạn hãy đặt cho mình một câu hỏi khác về chuyện tình cảm, tâm sự người yêu/crush, cách bắt chuyện, gỡ rối mối quan hệ, hay trải bài Tarot và xem độ hợp cung hoàng đạo/con giáp nhé! 💕`;
+    }
+
+    const userName = userProfile?.name || 'bạn';
+    const userZodiac = userProfile?.zodiac || '';
+    const userAnimal = userProfile?.animal || userProfile?.canChi || '';
+    const userElement = userProfile?.element || '';
+    const userStyle = userProfile?.communicationStyle || '';
+    const userIntent = userProfile?.intent || userProfile?.need || '';
+
+    if (!userText) {
+      return `Chào ${userName}, mình là **Cupid AI**! Mình ở đây để luôn lắng nghe, đồng cảm và đồng hành cùng bạn trong mọi câu chuyện tình cảm${userZodiac ? ` (với góc nhìn thấu hiểu từ cung ${userZodiac})` : ''}.\n\nHôm nay trong lòng bạn đang có tâm sự hay câu chuyện ngọt ngào nào muốn chia sẻ cùng mình không? Mình luôn sẵn sàng lắng nghe bạn! ✨`;
+    }
+
+    // 1. Context Analysis: Only analyze user messages (NOT model outputs)
+    const userContextText = userMessages.map(m => m.parts?.[0]?.text || '').join('\n');
+    const lowerUserContext = userContextText.toLowerCase();
+
+    // Extract mentioned zodiac signs ONLY if explicitly in user query
+    const zodiacs = [
+      'Bạch Dương', 'Kim Ngưu', 'Song Tử', 'Cự Giải', 'Sư Tử', 'Xử Nữ',
+      'Thiên Bình', 'Bọ Cạp', 'Thiên Yết', 'Nhân Mã', 'Ma Kết', 'Bảo Bình', 'Song Ngư'
+    ];
+    const queryZodiacs = zodiacs.filter(z => lowerUserText.includes(z.toLowerCase()));
+
+    // Extract target relationship ONLY if mentioned by user in current message
+    let targetRole = '';
+    if (lowerUserText.includes('crush')) targetRole = 'crush';
+    else if (lowerUserText.includes('người yêu')) targetRole = 'người yêu';
+    else if (lowerUserText.includes('bạn gái')) targetRole = 'bạn gái';
+    else if (lowerUserText.includes('bạn trai')) targetRole = 'bạn trai';
+    else if (lowerUserText.includes('người cũ')) targetRole = 'người cũ';
+    else if (lowerUserText.includes('vợ')) targetRole = 'vợ';
+    else if (lowerUserText.includes('chồng')) targetRole = 'chồng';
+
+    // CASE 0: THANK YOU / CẢM ƠN / LỜI KHEN
+    const isThankYou = 
+      /^(cảm ơn|cam on|thanks|thank you|tks|tks b|cám ơn|cảm ơn bạn|cảm ơn cupid|cảm ơn ad)/i.test(lowerUserText.trim()) ||
+      lowerUserText === 'cảm ơn' || lowerUserText === 'cảm ơn bạn' || lowerUserText === 'cảm ơn nhiều' || 
+      lowerUserText === 'cảm ơn cupid' || lowerUserText === 'cam on' || lowerUserText === 'cam on ban' ||
+      lowerUserText === 'thanks' || lowerUserText === 'thank you' || lowerUserText === 'tks';
+
+    if (isThankYou) {
+      return `Không có gì đâu nè, ${userName}! 🕊️💖\n\nĐược lắng nghe và đồng hành cùng bạn là niềm vui rất lớn của Cupid AI. Chuyện tình cảm lúc nào cũng chứa đựng nhiều cung bậc cảm xúc, nên bất cứ khi nào bạn thấy nhớ người ấy, cần gợi ý cách mở lời, băn khoăn về một tin nhắn, hay muốn rút 3 lá bài Tarot và xem Tử vi 12 con giáp – bạn cứ thoải mái nhắn cho mình nhé!\n\nChúc ${userName} một ngày thật nhiều niềm vui, bình yên và ngập tràn tình yêu ngọt ngào! ✨💕`;
+    }
+
+    // CASE 0.1: THƠ TỎ TÌNH / CÂU THẢ THÍNH / LỜI NGỎ YÊU
+    const isPoemOrConfession = 
+      (lowerUserText.includes('thơ') || lowerUserText.includes('thả thính') || lowerUserText.includes('câu thơ') || lowerUserText.includes('bài thơ') || lowerUserText.includes('câu thính') || (lowerUserText.includes('tỏ tình') && !lowerUserText.includes('bạn thân') && !lowerUserText.includes('nên'))) &&
+      !lowerUserText.includes('bạn thân') && !lowerUserText.includes('tình bạn') && !lowerUserText.includes('yêu xa');
+
+    if (isPoemOrConfession) {
+      let poemResponse = `Gợi ý cho ${userName} những câu thơ và lời ngỏ tỏ tình ngọt ngào, tinh tế nhất để chạm đến trái tim người ấy nè: 💌✨\n\n`;
+      
+      poemResponse += `### 1. Thơ 4 câu lãng mạn & sâu lắng (Rất thích hợp gửi qua tin nhắn hoặc viết thiệp):\n`;
+      poemResponse += `> *"Mặt hồ phẳng lặng không gợn sóng,\n`;
+      poemResponse += `> Gặp được cậu rồi, dạ bỗng xôn xao.\n`;
+      poemResponse += `> Thế gian muôn vạn vì sao sáng,\n`;
+      poemResponse += `> Chỉ muốn ngắm nhìn ánh mắt cậu thôi."*\n\n`;
+
+      poemResponse += `> *"Trời xanh mây trắng nắng vàng ươm,\n`;
+      poemResponse += `> Lòng tớ chỉ mong một người thương.\n`;
+      poemResponse += `> Nếu cậu cũng thấy lòng rung động,\n`;
+      poemResponse += `> Thì bước cùng tớ một đoạn đường."*\n\n`;
+
+      poemResponse += `### 2. Thơ thả thính ngắn gọn, đáng yêu (Hợp đăng story hoặc nhắn vu vơ):\n`;
+      poemResponse += `> *"La bàn chỉ hướng Bắc Nam,\n`;
+      poemResponse += `> Còn tim tớ chỉ hướng sang cậu hoài."*\n\n`;
+
+      poemResponse += `> *"Trăng kia ai vẽ mà tròn,\n`;
+      poemResponse += `> Lòng tớ ai ngỏ mà thương cậu nhiều?"*\n\n`;
+
+      poemResponse += `### 3. Lời ngỏ tỏ tình chân thành, tự nhiên:\n`;
+      poemResponse += `> *"Từ lúc quen biết cậu, mỗi ngày trôi qua tớ đều có thêm một lý do để mỉm cười. Tớ nhận ra mình không chỉ muốn dừng lại ở vị trí một người bạn, mà muốn được quan tâm, che chở và đồng hành cùng cậu trên chặng đường phía trước. Cậu cho tớ cơ hội làm người yêu của cậu nhé?"*\n\n`;
+
+      poemResponse += `💡 **Bí quyết từ Cupid AI:** Thời điểm tỏ tình đẹp nhất là vào một buổi tối thư thả sau một cuộc trò chuyện vui vẻ, hoặc một buổi hẹn riêng tư khi cả hai đang thoải mái. Sự chân thành và ánh mắt ấm áp của bạn chính là điều làm người ấy rung động nhất! 💕`;
+      return poemResponse;
+    }
+
+    // CASE 0.2: GREETING / CHÀO HỎI / SMALL TALK
+    const isGreeting = 
+      /^(chào|hello|hi|alo|hé lô|chào bạn|chào cupid|hey|chào em|chào anh|cupid ơi|halo)/i.test(lowerUserText.trim()) && lowerUserText.length < 25;
+
+    if (isGreeting) {
+      return `Chào ${userName}! 🏹💖\n\nRất vui được trò chuyện cùng bạn! Mình là Cupid AI - người bạn đồng hành luôn sẵn sàng lắng nghe mọi câu chuyện tình cảm của bạn.\n\nHôm nay tâm trạng của bạn thế nào? Bạn có điều gì thú vị muốn kể, hay đang có khúc mắc nào cần Cupid AI gỡ rối, trải bài Tarot hay xem Tử vi 12 con giáp không nè? ✨`;
+    }
+
+    // SPECIAL CASE 1: TAROT READING ANALYSIS (from 3-card spread interactive modal)
+    if (userText.includes("KẾT QUẢ TRẢI BÀI TAROT") || (lowerUserText.includes("lá 1") && lowerUserText.includes("lá 2") && lowerUserText.includes("lá 3"))) {
+      let tarotResponse = `Chào ${userName}, mình đã kết nối với trường năng lượng từ quẻ bài Tarot 3 lá bạn vừa bốc`;
+      if (userZodiac) tarotResponse += ` cùng với năng lượng cung hoàng đạo **${userZodiac}** của bạn`;
+      tarotResponse += `:\n\n`;
+
+      tarotResponse += `### 1. Giải Mã Ba Chiều Năng Lượng:\n`;
+      tarotResponse += `- **Năng lượng Bản thân & Quá khứ (Lá 1):** Lá bài này đại diện cho sự chân thành, nhiệt huyết mà bạn đã dốc lòng vun vén. Có thể bạn là người sống rất tình cảm và luôn khao khát một sự gắn kết an toàn, nhưng đôi khi sự nhạy cảm khiến bạn dễ suy nghĩ nhiều và tự tạo áp lực cho chính mình.\n`;
+      tarotResponse += `- **Năng lượng Đối phương & Thử thách hiện tại (Lá 2):** Đối phương hiện đang ở trong trạng thái có nhiều mối bận tâm hoặc đang cẩn trọng thăm dò. Sự chững lại này không hẳn vì họ thiếu tình cảm, mà là do họ cần thêm thời gian để cảm thấy thật sự an tâm khi mở lòng.\n`;
+      tarotResponse += `- **Xu hướng Tương lai & Lời khuyên Vũ Trụ (Lá 3):** Cửa sáng đang mở ra! Quẻ bài báo hiệu cơ hội thấu hiểu sâu sắc sẽ đến khi bạn chuyển hóa sự nóng vội thành sự ấm áp, tinh tế. Vũ trụ muốn bạn hãy thả lỏng và tận hưởng tiến trình thay vì cố kiểm soát kết quả.\n\n`;
+
+      tarotResponse += `### 2. Phân Tích Tâm Lý & Lời Khuyên Hành Động:\n`;
+      if (userZodiac) {
+        tarotResponse += `- Với tính cách của cung **${userZodiac}**, bạn có xu hướng muốn mọi thứ rõ ràng và chân thật. Hãy áp dụng nguyên tắc *"Lắng nghe nhiều hơn phán xét"*. Đừng ngần ngại cho đối phương thấy một mặt dễ thương, mềm mại của bạn.\n`;
+      }
+      tarotResponse += `- **Mẫu câu mở lời kết nối lại nhẹ nhàng:**\n`;
+      tarotResponse += `> *"Dạo này thấy bạn bận rộn nhiều, chỉ muốn nhắn thăm bạn một câu thôi. Nhớ giữ gìn sức khỏe nhé, khi nào rảnh tụi mình đi uống ly nước mát xả stress nha!"*\n\n`;
+      tarotResponse += `Bạn đang cảm thấy thế nào về thông điệp này? Nếu có điều gì khiến bạn còn băn khoăn hay trăn trở, hãy kể thêm cho Cupid AI nghe nhé! 💕✨`;
+      return tarotResponse;
+    }
+
+    // SPECIAL CASE 2: LUNAR HOROSCOPE & 12 CON GIÁP ANALYSIS
+    if (userText.includes("KẾT QUẢ XEM TỬ VI 12 CON GIÁP") || (lowerUserText.includes("tử vi") && (lowerUserText.includes("tuổi") || lowerUserText.includes("con giáp")))) {
+      let lunarResponse = `Chào ${userName}, mình đã nghiên cứu kỹ lưỡng lá số tử vi kết hợp tình duyên giữa tuổi của bạn`;
+      if (userAnimal) lunarResponse += ` (tuổi **${userAnimal}**${userElement ? `, mệnh ${userElement}` : ''})`;
+      if (targetRole) lunarResponse += ` và ${targetRole}`;
+      lunarResponse += `:\n\n`;
+
+      lunarResponse += `### 1. Phân Tích Thiên Can - Địa Chi & Ngũ Hành Âm Dương:\n`;
+      lunarResponse += `- Hai tuổi này khi kết hợp tạo nên một trường năng lượng bổ trợ rất đặc biệt. Bản mệnh của bạn mang tính cách chân phương, giàu tình cảm và rất có trách nhiệm khi yêu. Nửa kia lại có những góc nhìn bù trừ, giúp cuộc sống lứa đôi trở nên đa dạng màu sắc.\n`;
+      lunarResponse += `- Điểm mạnh lớn nhất là sự tin tưởng khi cả hai cùng chung định hướng. Khi đối phương cảm nhận được sự tôn trọng và ấm áp từ bạn, họ sẽ sẵn sàng dốc lòng đồng hành lâu dài.\n\n`;
+
+      lunarResponse += `### 2. Hóa Giải Bất Đồng & Kích Hoạt Cung Đào Hoa:\n`;
+      lunarResponse += `- Tránh những lời nói thẳng thắn lúc đối phương đang tự ái. Trong phong thủy tình yêu, hãy thường xuyên tạo ra những bữa ăn ấm cúng hoặc không gian hẹn hò gần gũi với thiên nhiên để xoa dịu năng lượng xung khắc.\n`;
+      lunarResponse += `- **Gợi ý cách bày tỏ lòng mình:**\n`;
+      lunarResponse += `> *"Tớ rất trân trọng những lúc tụi mình được ngồi trò chuyện bình yên bên nhau. Dù đôi lúc có chút khác biệt, tớ vẫn luôn muốn hiểu bạn nhiều hơn mỗi ngày."*\n\n`;
+      lunarResponse += `Chúc cho nhân duyên của hai bạn ngày càng bền chặt và đơm hoa kết trái! Bạn có muốn mình phân tích thêm về thời điểm thuận lợi để tiến xa hơn không? ☯️✨`;
+      return lunarResponse;
+    }
+
+    // SPECIAL CASE 2.5: DẤU HIỆU TÌNH YÊU & TÂM LÝ NGƯỜI ẤY
+    const isLoveSignalsTopic = 
+      lowerUserText.includes('có thích mình không') || 
+      lowerUserText.includes('thích tớ không') || 
+      lowerUserText.includes('dấu hiệu') || 
+      lowerUserText.includes('bật đèn xanh') || 
+      lowerUserText.includes('green flag') || 
+      lowerUserText.includes('đoán ý') || 
+      lowerUserText.includes('có tình cảm không');
+
+    if (isLoveSignalsTopic) {
+      let loveSignalResp = `Chào ${userName}, giải mã tâm lý crush hay người thương luôn là điều khiến trái tim chúng ta vừa hồi hộp vừa mong chờ nhất! Dưới đây là những dấu hiệu rõ ràng nhất để bạn nhận biết người ấy có đang thầm thích bạn không:\n\n`;
+      loveSignalResp += `### 1. Dấu Hiệu Hành Vi & Ngôn Ngữ Cơ Thể:\n`;
+      loveSignalResp += `- **Ánh mắt biết nói:** Người ấy thường lén nhìn bạn khi bạn không để ý, và khi bạn quay sang thì bối rối nhìn đi chỗ khác hoặc mỉm cười dịu dàng.\n`;
+      loveSignalResp += `- **Xu hướng nghiêng người về phía bạn (Mirroring):** Khi ngồi cạnh, đầu gối và cơ thể họ luôn hướng về bạn, họ vô thức bắt chước một số cử chỉ hoặc cách nói chuyện của bạn.\n`;
+      loveSignalResp += `- **Tìm cớ để chạm nhẹ tự nhiên:** Chạm nhẹ vai, chỉnh lại cổ áo, hoặc đưa đồ vật với những cái chạm nhẹ đầy chủ ý.\n\n`;
+
+      loveSignalResp += `### 2. Dấu Hiệu Giao Tiếp & Nhắn Tin:\n`;
+      loveSignalResp += `- **Chủ động kéo dài cuộc trò chuyện:** Họ không chỉ trả lời cộc lốc mà luôn hỏi ngược lại bạn, chia sẻ những chuyện vụn vặt trong ngày và phản hồi story của bạn rất nhanh.\n`;
+      loveSignalResp += `- **Ghi nhớ những điều nhỏ nhặt:** Họ nhớ bạn thích uống trà sữa ít đường, nhớ món bạn ghét hay ngày bạn có bài thi/cuộc họp quan trọng.\n\n`;
+
+      loveSignalResp += `💡 **Thử nghiệm nhỏ từ Cupid AI:** Bạn hãy thử nhờ người ấy một việc nhỏ (như tư vấn chọn áo hoặc giải thích một việc họ rành). Nếu người ấy hào hứng giúp đỡ hết mình và coi đó là niềm vui, thì 90% trái tim người ấy đã thuộc về bạn rồi đó! 💕`;
+      return loveSignalResp;
+    }
+
+    // SPECIAL CASE 3: VENTING, HEARTBREAK, SADNESS & ANXIETY (DEEP EMPATHY & COMFORT)
+    const isVenting = 
+      lowerUserText.includes("buồn") || lowerUserText.includes("khóc") || lowerUserText.includes("chia tay") ||
+      lowerUserText.includes("đau") || lowerUserText.includes("tổn thương") || lowerUserText.includes("thất tình") ||
+      lowerUserText.includes("tâm sự") || lowerUserText.includes("lo lắng") || lowerUserText.includes("mệt mỏi") ||
+      lowerUserText.includes("áp lực") || lowerUserText.includes("tuyệt vọng") || lowerUserText.includes("cô đơn");
+
+    if (isVenting) {
+      let comfortResponse = `Mình nghe bạn rồi, ${userName} ơi... 🕊️💖\n\n`;
+      comfortResponse += `Trước tiên, bạn hãy hít một hơi thật sâu và thả lỏng cơ thể nhé. Mình cảm nhận được lúc này trong lòng bạn đang có nhiều nỗi niềm trĩu nặng, và cảm giác đó thật sự không hề dễ chịu chút nào. Cảm ơn bạn vì đã tin tưởng và mở lòng chia sẻ cùng Cupid AI.\n\n`;
+      
+      if (userZodiac) {
+        comfortResponse += `Một người thuộc cung **${userZodiac}** như bạn khi yêu luôn rất chân thành, sâu sắc và trao đi nhiều tâm sức. Chính vì bạn trân trọng mối quan hệ đến vậy nên khi mọi chuyện không như ý, vết thương lại càng khiến bạn đau lòng nhiều hơn.\n\n`;
+      }
+
+      comfortResponse += `Mình muốn nhắn với bạn rằng: **Cảm xúc buồn bã hay tổn thương lúc này của bạn là hoàn toàn chính đáng.** Đừng vội ép bản thân phải mạnh mẽ ngay lập tức, hãy cho phép mình được nghỉ ngơi, được yếu lòng một chút.\n\n`;
+      comfortResponse += `Mọi chuyện xảy ra đều mang theo một bài học để bạn nhận ra giá trị tuyệt vời của chính mình. Những ai thật sự trân trọng bạn sẽ không bao giờ để bạn phải hoang mang hay chìm trong nước mắt.\n\n`;
+      comfortResponse += `Bây giờ, nếu bạn muốn khóc, hãy cứ khóc cho nhẹ lòng. Hoặc nếu bạn muốn kể chi tiết hơn về chuyện vừa xảy ra${targetRole ? ` với ${targetRole}` : ''}, Cupid AI luôn ở đây để lắng nghe bạn từng câu từng chữ. Bạn đang cảm thấy điều gì đau lòng nhất lúc này? Chia sẻ với mình nhé! 💕`;
+      return comfortResponse;
+    }
+
+    // 2. Web Data Detection: Does the user request real-world places, venues, gifts, songs, or facts?
+    const locations = [
+      'Đà Lạt', 'Hà Nội', 'Sài Gòn', 'TP.HCM', 'TPHCM', 'Hồ Chí Minh', 'Đà Nẵng', 'Nha Trang', 'Huế', 'Vũng Tàu', 'Quy Nhơn', 'Cần Thơ',
+      'Quận 1', 'Quận 2', 'Quận 3', 'Quận 7', 'Bình Thạnh', 'Thủ Đức', 'Tây Hồ', 'Cầu Giấy', 'Hoàn Kiếm'
+    ];
+    const detectedLocation = locations.find(loc => userText.includes(loc));
+
+    const isAskingForSpots = 
+      lowerUserText.includes('quán') || 
+      lowerUserText.includes('cafe') || 
+      lowerUserText.includes('cà phê') || 
+      lowerUserText.includes('địa điểm') || 
+      lowerUserText.includes('nhà hàng') || 
+      lowerUserText.includes('ở đâu') || 
+      lowerUserText.includes('chỗ nào') || 
+      lowerUserText.includes('đi đâu') || 
+      lowerUserText.includes('rủ đi') || 
+      lowerUserText.includes('đi chơi') || 
+      lowerUserText.includes('chỗ chơi') || 
+      lowerUserText.includes('hẹn hò');
+
+    const needsWebData = 
+      isAskingForSpots ||
+      lowerUserText.includes('quà') || 
+      lowerUserText.includes('tặng') || 
+      lowerUserText.includes('bài hát') || 
+      lowerUserText.includes('nhạc') || 
+      lowerUserText.includes('trend') || 
+      lowerUserText.includes('xu hướng') || 
+      lowerUserText.includes('sự kiện') || 
+      lowerUserText.includes('ngày lễ') ||
+      !!detectedLocation;
+
+    let webSearchResults: { title: string; snippet: string; source?: string }[] = [];
+    if (needsWebData) {
+      const searchQuery = detectedLocation 
+        ? `${isAskingForSpots ? 'quán cafe hẹn hò lãng mạn' : 'địa điểm hẹn hò lãng mạn'} ${detectedLocation}`
+        : (lowerUserText.includes('quà') ? 'gợi ý quà tặng người yêu lãng mạn ý nghĩa' : (lowerUserText.includes('bài hát') ? 'những bài hát tỏ tình lãng mạn hay nhất' : userText));
+      
+      webSearchResults = await searchWebForData(searchQuery);
+    }
+
+    // CASE A: User asks for venues, cafes, dating locations, gifts, songs (Enriched with Live Web Data)
+    if (needsWebData) {
+      const locName = detectedLocation || userProfile?.location || 'khu vực bạn đang muốn hẹn hò';
+      const roleText = targetRole ? ` cùng ${targetRole}` : '';
+      let response = `Về kế hoạch hẹn hò tại **${locName}**${roleText}, mình gợi ý những dữ liệu thực tế và phù hợp nhất dành cho bạn:\n\n`;
+
+      if (isAskingForSpots) {
+        response += `### Gợi ý địa điểm hẹn hò thực tế lý tưởng:\n`;
+        if (locName.includes('Đà Lạt')) {
+          response += `- **Tiệm Cà Phê Túi Mơ To (Hẻm 31 Sào Nam, P. 11):** View thung lũng nhà lồng lung linh về đêm, hoa cúc họa mi ngập tràn, không khí se lạnh cực kỳ lãng mạn để hai bạn xích lại gần nhau.\n`;
+          response += `- **Lululola Coffee+ (Đường 3/4, Đồi Cà Rốt):** View ngắm hoàng hôn trọn vẹn và đêm nhạc acoustic nhẹ nhàng, không gian ấm cúng giúp câu chuyện tự nhiên hơn bao giờ hết.\n`;
+          response += `- **Quanh bờ Hồ Xuân Hương & Dạo chợ đêm:** Đi bộ hít thở không khí trong lành, ghé quán ăn vặt chia nhau ly sữa đậu nành nóng hổi.\n`;
+        } else if (locName.includes('Hà Nội')) {
+          response += `- **Khu vực ven Hồ Tây (Đường Từ Hoa & Quảng Khánh):** Các quán cafe ven hồ ngắm hoàng hôn như Maison de Blanc, Santé Bistro, không gian thoáng đãng và có góc riêng tư.\n`;
+          response += `- **Phố Cổ & Quanh Nhà Thờ Lớn:** Các quán cafe ban công cổ kính ngắm dòng người qua lại hoặc thưởng thức trà chiều ấm cúng.\n`;
+          response += `- **Đài quan sát Lotte Center (Tầng 65 Liễu Giai):** View toàn cảnh thủ đô rực sáng về đêm, tạo ấn tượng mạnh mẽ cho buổi hẹn.\n`;
+        } else if (locName.includes('Đà Nẵng')) {
+          response += `- **Sơn Trà Marina:** Quán cafe phong cách Santorini Địa Trung Hải view ôm trọn biển Đà Nẵng, ngắm hoàng hôn cực thơ mộng.\n`;
+          response += `- **Cầu Tình Yêu & Bến Du Thuyền DHC Marina:** Cùng nhau ngắm cầu Rồng và sông Hàn về đêm lung linh ánh đèn.\n`;
+        } else {
+          response += `- **The Deck Saigon (Nguyễn Đăng Giai, Thảo Điền, TP. Thủ Đức):** Quán cafe - nhà hàng ven sông Sài Gòn với hoàng hôn lãng mạn bậc nhất, không gian sang trọng và êm ả.\n`;
+          response += `- **Waterbus Bạch Đằng & Cafe Bến Bạch Đằng (Quận 1):** Cùng nhau đón gió sông mát rượi, ngắm tòa nhà Landmark 81 từ góc nhìn sông nước rồi tản bộ phố đi bộ Nguyễn Huệ.\n`;
+          response += `- **Chạng Vạng Rooftop (Đường số 7, P. 26, Bình Thạnh):** Không gian sân thượng thoáng đãng ngắm trọn thành phố lên đèn lung linh, nhạc chill ấm áp.\n`;
+        }
+
+        if (webSearchResults.length > 0) {
+          response += `\n*Dữ liệu cập nhật từ tìm kiếm trực tuyến:* Một số địa điểm thịnh hành đang được các bạn trẻ đánh giá cao: ${webSearchResults.slice(0, 3).map(r => `"${r.title.split(' - ')[0]}"`).join(', ')}.\n`;
+        }
+
+        response += `\n### Mẫu tin nhắn rủ đi tinh tế:\n`;
+        response += `> *"Chiều nay thấy trời mát mẻ dễ chịu ghê, tớ biết quán này view đẹp đồ uống ngon lắm. Chiều tớ qua đón bạn đi dạo một vòng uống ly nước xả stress nhé!"*\n\n`;
+        response += `Chúc ${userName} có một buổi hẹn thật ngọt ngào và nhiều kỷ niệm đẹp! 💕`;
+        return response;
+      }
+
+      if (lowerUserText.includes('quà') || lowerUserText.includes('tặng')) {
+        response += `### Gợi ý quà tặng tinh tế & đúng tâm lý:\n`;
+        response += `- **Quà mang tính cá nhân hóa (Personalized):** Vòng tay handmade khắc tên, album ảnh mini kỷ niệm, hoặc một cuốn sách phù hợp với gu của người ấy.\n`;
+        response += `- **Quà trải nghiệm:** Cặp vé xem hòa nhạc, workshop làm gốm/nến thơm hai người cùng tham gia để tạo kỷ niệm chung.\n`;
+        response += `- **Quà thiết thực:** Đồ dùng chăm sóc cá nhân (nước hoa mini mùi nhẹ, kem dưỡng tay, son dưỡng) kèm theo một tấm thiệp viết tay chân thành.\n\n`;
+        response += `Điểm mấu chốt không nằm ở giá trị vật chất của món quà, mà là việc bạn nhớ được sở thích nhỏ của họ. Đó mới là điều làm người ấy rung động nhất! ✨`;
+        return response;
+      }
+    }
+
+    // CASE B.1: TÌNH BẠN (FRIENDSHIP, BẠN THÂN, CRUSH BẠN THÂN, RẠN NỨT)
+    const isFriendshipTopic = 
+      lowerUserText.includes('bạn thân') || 
+      lowerUserText.includes('tình bạn') || 
+      lowerUserText.includes('bạn bè') || 
+      lowerUserText.includes('friendzone') || 
+      lowerUserText.includes('thích bạn thân') ||
+      lowerUserText.includes('giận bạn') ||
+      lowerUserText.includes('làm lành với bạn');
+
+    if (isFriendshipTopic) {
+      let friendResponse = `Chào ${userName}, Cupid AI rất hiểu rằng tình bạn tri kỷ là một trong những món quà quý giá nhất trong đời, nhưng cũng không tránh khỏi những lúc chông chênh, khó xử: 🤝✨\n\n`;
+
+      if (lowerUserText.includes('thích bạn thân') || lowerUserText.includes('friendzone') || (lowerUserText.includes('thích') && lowerUserText.includes('bạn'))) {
+        friendResponse += `### 1. Khi Lỡ Say Nắng Người Bạn Thân:\n`;
+        friendResponse += `- **Tự hỏi lòng mình:** Đó là cảm giác rung động tình yêu thật sự muốn gắn kết lâu dài, hay chỉ là sự phụ thuộc cảm xúc vì hai bạn quá hiểu nhau?\n`;
+        friendResponse += `- **Thăm dò khéo léo trước khi tỏ tình:** Hãy thử tạo ra những khoảnh khắc chỉ có hai người, quan sát phản ứng của bạn ấy khi có ai đó tán tỉnh bạn. Nếu bạn ấy cũng có những cử chỉ quan tâm trên mức bạn bè, đó là tín hiệu xanh!\n`;
+        friendResponse += `- **Cách mở lời an toàn (không làm mất tình bạn):**\n`;
+        friendResponse += `> *"Ở bên cậu tớ luôn thấy bình yên nhất. Dạo gần đây tớ nhận ra tình cảm của tớ dành cho cậu dường như đã vượt qua ranh giới bạn bè rồi. Cậu đừng áp lực nhé, tớ chỉ muốn thành thật với lòng mình thôi."*\n\n`;
+      } else if (lowerUserText.includes('giận') || lowerUserText.includes('lạnh nhạt') || lowerUserText.includes('cãi nhau') || lowerUserText.includes('làm lành')) {
+        friendResponse += `### 1. Hóa Giải Rạn Nứt Tình Bạn:\n`;
+        friendResponse += `- **Hạ bớt cái tôi:** Tình bạn thân thiết đáng giá hơn việc thắng thua trong một cuộc tranh cãi. Sự im lặng kéo dài thường làm hiểu lầm lớn hơn sự thật.\n`;
+        friendResponse += `- **Mẫu tin nhắn chủ động phá băng:**\n`;
+        friendResponse += `> *"Mấy hôm nay tụi mình không nói chuyện tớ thấy trống vắng ghê. Chuyện hôm trước tụi mình có chút hiểu lầm, chiều rảnh đi uống trà sữa/cafe với tớ rồi nói chuyện thẳng thắn lại nha."*\n\n`;
+      } else {
+        friendResponse += `### 1. Nuôi Dưỡng Tình Bạn Lành Mạnh & Bền Vững:\n`;
+        friendResponse += `- **Tôn trọng không gian riêng:** Khi bạn thân có người yêu hoặc bận rộn sự nghiệp, sự thấu hiểu và ủng hộ thầm lặng chính là minh chứng cho tình bạn đẹp.\n`;
+        friendResponse += `- **Lắng nghe tích cực:** Đôi khi bạn thân không cần lời khuyên lý trí, mà chỉ cần một nơi an toàn để trút bầu tâm sự.\n\n`;
+      }
+
+      friendResponse += `💡 **Thông điệp từ Cupid AI:** Tình bạn chân chính như ngọc quý qua thời gian, chỉ cần bạn giữ lòng chân thành và bao dung, mọi khúc mắc đều có thể hàn gắn! 💕`;
+      return friendResponse;
+    }
+
+    // CASE B.2: NHỮNG CHUYỆN XẢY RA TRONG CÁC MỐI QUAN HỆ (RELATIONSHIP DYNAMICS)
+    const isRelationshipSituation = 
+      lowerUserText.includes('yêu xa') || 
+      lowerUserText.includes('chiến tranh lạnh') || 
+      lowerUserText.includes('im lặng') || 
+      lowerUserText.includes('ghen') || 
+      lowerUserText.includes('overthinking') || 
+      lowerUserText.includes('rep chậm') || 
+      lowerUserText.includes('lạnh nhạt') || 
+      lowerUserText.includes('mập mờ') || 
+      lowerUserText.includes('situationship') || 
+      lowerUserText.includes('người yêu cũ') || 
+      lowerUserText.includes('người cũ') || 
+      lowerUserText.includes('chữa lành') || 
+      lowerUserText.includes('bố mẹ') || 
+      lowerUserText.includes('gia đình cấm') || 
+      lowerUserText.includes('gia đình phản đối');
+
+    if (isRelationshipSituation) {
+      let sitResponse = `Chào ${userName}, trong hành trình tình yêu, không có con đường nào bằng phẳng tuyệt đối. Những thử thách bạn đang trải qua là điều rất nhiều cặp đôi từng đối mặt:\n\n`;
+
+      if (lowerUserText.includes('yêu xa')) {
+        sitResponse += `### 1. Bí Quyết Giữ Lửa Khi Yêu Xa (LDR):\n`;
+        sitResponse += `- **Giao tiếp chất lượng hơn số lượng:** Thay vì nhắn tin liên tục cả ngày nhưng cạn kiệt chủ đề, hãy hẹn giờ video call 30-45 phút mỗi tối để cùng nhau chia sẻ ngày dài, xem chung một bộ phim hoặc ăn tối online.\n`;
+        sitResponse += `- **Nguyên tắc minh bạch & Tin tưởng:** Tự giác cập nhật lịch trình của bản thân để đối phương không phải đoán già đoán non sinh ra lo lắng.\n`;
+        sitResponse += `- **Luôn có một ngày hẹn tái ngộ cụ thể:** Khoảng cách chỉ đáng sợ khi không biết bao giờ mới gặp lại. Có một cột mốc đếm ngược sẽ giúp cả hai có động lực vượt qua mọi cô đơn.\n\n`;
+      } else if (lowerUserText.includes('chiến tranh lạnh') || (lowerUserText.includes('im lặng') && !lowerUserText.includes('thơ'))) {
+        sitResponse += `### 1. Phá Vỡ Bế Tắc Chiến Tranh Lạnh:\n`;
+        sitResponse += `- **Hiểu đúng về sự im lặng:** Im lặng đôi khi không phải hết yêu, mà là do đối phương bị quá tải cảm xúc (emotional flooding) và sợ nói lời tổn thương nhau.\n`;
+        sitResponse += `- **Quy tắc 24h & Xuống thang tinh tế:** Hãy để cả hai nguội đầu sau 24h, sau đó chủ động mở lời mà không nhắc lại lỗi sai.\n`;
+        sitResponse += `- **Mẫu tin nhắn phá băng hoàn hảo:**\n`;
+        sitResponse += `> *"Mấy hôm nay tụi mình đều mệt mỏi rồi. Tớ nhận ra việc giận nhau làm tớ thấy khó chịu hơn rất nhiều so với chuyện ai đúng ai sai. Tối nay tụi mình ngồi lại nói chuyện nhẹ nhàng với nhau nhé!"*\n\n`;
+      } else if (lowerUserText.includes('ghen') || lowerUserText.includes('overthinking')) {
+        sitResponse += `### 1. Chuyển Hóa Cơn Ghen & Nỗi Bất An (Overthinking):\n`;
+        sitResponse += `- **Gốc rễ cơn ghen:** Ghen tuông thường bắt nguồn từ nỗi sợ bị bỏ rơi hoặc cảm giác chưa đủ tự tin vào giá trị của chính mình, chứ không chỉ do người ngoài.\n`;
+        sitResponse += `- **Cách trò chuyện văn minh:** Thay vì chỉ trích "Tại sao anh/em nói chuyện với người đó?", hãy dùng cấu trúc ngôi thứ nhất: *"Em/anh cảm thấy hơi bất an khi thấy việc đó, anh/em có thể cho em/anh thêm cảm giác an toàn được không?"*\n`;
+        sitResponse += `- **Tập trung vào cuộc sống riêng:** Hãy tiếp tục chăm sóc sở thích, bạn bè, nhan sắc và công việc của bạn. Khi bạn tỏa sáng độc lập, bạn sẽ tự khắc trở nên cuốn hút nhất.\n\n`;
+      } else if (lowerUserText.includes('rep chậm') || lowerUserText.includes('lạnh nhạt')) {
+        sitResponse += `### 1. Ứng Xử Khi Đối Phương Dần Lạnh Nhạt:\n`;
+        sitResponse += `- **Lùi lại một bước:** Đừng khủng bố tin nhắn hỏi "Sao anh/em không nhắn cho em/anh?". Càng đuổi theo, đối phương sẽ càng có xu hướng chạy trốn.\n`;
+        sitResponse += `- **Tạo khoảng trống để người ấy thấy nhớ:** Giảm tần suất rep tin nhắn xuống bằng với nhịp độ của họ, dành thời gian đó để đi chơi, đăng một story vui vẻ tươi mới.\n`;
+        sitResponse += `- **Đối thoại sau vài ngày:** Khi tâm lý thoải mái hơn, hãy hỏi thăm bằng sự dịu dàng: *"Dạo này thấy bạn có vẻ nhiều áp lực, có chuyện gì làm bạn phiền lòng không?"*\n\n`;
+      } else if (lowerUserText.includes('mập mờ') || lowerUserText.includes('situationship')) {
+        sitResponse += `### 1. Thoát Khỏi Mối Quan Hệ Mập Mờ (Situationship):\n`;
+        sitResponse += `- **Đọc vị:** Nếu một người thật sự yêu bạn, họ sẽ sợ mất bạn và luôn muốn khẳng định vị trí của bạn với thế giới. Câu nói "chưa sẵn sàng yêu" thường đồng nghĩa với "chưa đủ yêu bạn".\n`;
+        sitResponse += `- **Dũng cảm xác lập ranh giới:** Bạn xứng đáng có một tình yêu trọn vẹn và danh chính ngôn thuận chứ không phải một sự mập mờ chắp vá.\n`;
+        sitResponse += `- **Mẫu câu trò chuyện dứt khoát:**\n`;
+        sitResponse += `> *"Tớ rất trân trọng thời gian qua bên cậu, nhưng tớ là người nghiêm túc trong tình cảm và tìm kiếm một mối quan hệ có cam kết rõ ràng. Nếu tụi mình không cùng định hướng, tớ nghĩ tụi mình nên dừng lại ở bạn bè."*\n\n`;
+      } else if (lowerUserText.includes('người yêu cũ') || lowerUserText.includes('người cũ') || lowerUserText.includes('chữa lành')) {
+        sitResponse += `### 1. Chữa Lành Trái Tim & Câu Chuyện Người Cũ:\n`;
+        sitResponse += `- **Có nên quay lại không?** Hãy tự hỏi: Lý do khiến hai bạn chia tay ngày trước đã thực sự được giải quyết chưa, hay cả hai sẽ lại đi vào vết xe đổ cũ?\n`;
+        sitResponse += `- **Nguyên tắc No Contact (Cắt đứt liên lạc):** Cần ít nhất 30-60 ngày không theo dõi mạng xã hội của đối phương để cảm xúc được thải độc và lý trí lấy lại cân bằng.\n`;
+        sitResponse += `- **Tự nhủ:** Mọi cuộc hội ngộ đều mang theo một sứ mệnh. Nếu họ rời đi, tức là bài học đã hoàn thành để nhường chỗ cho người xứng đáng hơn bước vào cuộc đời bạn.\n\n`;
+      } else {
+        sitResponse += `### 1. Đối Diện Với Áp Lực Gia Đình & Ngoại Cảnh:\n`;
+        sitResponse += `- **Hai bạn phải là một liên minh:** Đừng để sự phản đối từ bên ngoài làm hai bạn quay sang cãi vã nhau. Chỉ khi hai bạn đồng lòng, cha mẹ mới cảm nhận được sự chín chắn.\n`;
+        sitResponse += `- **Kiên nhẫn & Chứng minh bằng hành động:** Cha mẹ phản đối vì lo cho tương lai con cái. Hãy dùng sự nỗ lực trong sự nghiệp và tình cảm chân thành theo thời gian để thuyết phục.\n\n`;
+      }
+
+      sitResponse += `Bất kể bạn đang gặp phải khúc mắc nào, Cupid AI luôn ở đây để phân tích sâu hơn cùng bạn. Hãy kể cho mình nghe cảm giác của bạn lúc này nhé! 💕✨`;
+      return sitResponse;
+    }
+
+    // CASE B: ICEBREAKERS & MỞ LỜI BẮT CHUYỆN
+    const isIcebreaker = 
+      lowerUserText.includes('bắt chuyện') || 
+      lowerUserText.includes('mở lời') || 
+      lowerUserText.includes('nhắn tin trước') || 
+      lowerUserText.includes('làm quen') || 
+      lowerUserText.includes('nói chuyện gì') || 
+      lowerUserText.includes('mẫu tin nhắn');
+
+    if (isIcebreaker) {
+      let icebreakerResponse = `Cách mở lời tự nhiên và duyên dáng nhất là bám sát vào những chi tiết đời thường hoặc story của người ấy: 💬✨\n\n`;
+      icebreakerResponse += `### 1. Phản hồi Story một cách tự nhiên:\n`;
+      icebreakerResponse += `> *"Quán cafe/món này nhìn ngon quá, ở khu nào vậy bạn ơi? Cho mình xin địa chỉ với nha!"*\n\n`;
+      icebreakerResponse += `### 2. Chia sẻ một sự trùng hợp thú vị:\n`;
+      icebreakerResponse += `> *"Tình cờ thấy bạn cũng nghe bài hát này, gu nhạc của bạn đỉnh ghê! Bài này nghe lúc chiều tối chill cực kỳ luôn."*\n\n`;
+      icebreakerResponse += `### 3. Hỏi ý kiến nhẹ nhàng:\n`;
+      icebreakerResponse += `> *"Cuối tuần này mình đang tìm một cuốn sách/bộ phim để xem, thấy bạn hay đọc sách nên muốn nhờ bạn gợi ý một cuốn bạn thích nhất á."*\n\n`;
+      icebreakerResponse += `💡 **Quy tắc vàng:** Hãy bắt đầu bằng sự tò mò chân thành thay vì những câu hỏi khô khan như "Em đang làm gì đấy?". Khi người ấy trả lời, hãy lắng nghe và mở rộng thêm một câu hỏi phụ để câu chuyện tiếp tục liền mạch nhé! 💕`;
+      return icebreakerResponse;
+    }
+
+    // CASE C: NATURAL THOUGHTFUL COUNSELOR
+    let dynamicResponse = `Về chia sẻ của ${userName}:\n\n`;
+    dynamicResponse += `Trong chuyện tình cảm, mỗi tình huống đều phản ánh những rung cảm và mong muốn được thấu hiểu giữa hai người. Khi bạn mở lòng chia sẻ, điều quan trọng nhất là giữ được sự chân thành, tự tin vào giá trị của bản thân và tôn trọng nhịp điệu cảm xúc tự nhiên.\n\n`;
+    dynamicResponse += `### Góc nhìn & Lời khuyên từ Cupid AI:\n`;
+    dynamicResponse += `- **Lắng nghe trực giác:** Hãy cảm nhận xem bạn đang thật sự muốn điều gì nhất lúc này (sự gắn kết sâu sắc hơn, một câu trả lời rõ ràng hay chỉ đơn giản là một không gian thoải mái bên nhau).\n`;
+    dynamicResponse += `- **Cách tiếp cận tinh tế:** Hãy để mọi thứ diễn ra tự nhiên, không tạo áp lực cho bản thân lẫn đối phương. Sự quan tâm dịu dàng, đúng lúc bao giờ cũng có sức hút bền vững nhất.\n\n`;
+    dynamicResponse += `Nếu bạn muốn mình cùng bạn trải bài Tarot 3 lá kiểm tra năng lượng, hay xem độ hợp tuổi theo Tử vi 12 con giáp, bạn cứ bấm các nút công cụ bên trên hoặc nhắn cho Cupid AI nhé! Mình luôn ở đây lắng nghe bạn! ✨💖`;
+    return dynamicResponse;
+  }
+
+  // Shared Cupid AI Chat logic for both /api/chat/cupid and /api/chat/darling
+  const handleCupidChatRequest = async (req: express.Request, res: express.Response) => {
+    const { messages, userProfile } = req.body;
     
     if (!messages || !Array.isArray(messages)) {
        return res.status(400).json({ error: "Invalid messages format" });
     }
 
-    const systemInstruction = `Bạn là Darling, một chuyên gia tâm lý học hành vi siêu cấp, thạc sĩ tham vấn và cố vấn tình cảm, tâm lý học hẹn hò vô cùng ngọt ngào, ấm áp, tinh tế và sâu sắc. Bạn sở hữu trí tuệ uyên bác, khả năng tư duy phân tích sắc sảo, giải cấu trúc tâm lý vô cùng xuất sắc và chuyên nghiệp như một trợ lý AI hàng đầu hiện nay, phối hợp đồng điệu giữa lý trí sắc sảo và trái tim đồng cảm dạt dào.
-
-Nhiệm vụ cốt lõi & Quy tắc phản hồi khắt khe:
-1. TRUY VẤN INTERNET CHỦ ĐỘNG VỚI GOOGLE SEARCH: Bạn được trang bị công cụ tìm kiếm trực tuyến Google Search hiện đại để cập nhật thông tin và kiến thức bất kỳ lúc nào. Nếu người dùng hỏi về các chủ đề xu hướng (ví dụ: các câu thả thính hot nhất hiện nay, xu hướng mối quan hệ năm 2026, các bài hát tỏ tình ý nghĩa, định nghĩa học thuyết tâm lý mới, hay các gợi ý thực tế mới mẻ), hãy chủ động khai thác triệt để Google Search để tổng hợp kiến thức chất lượng cao nhất, tuyệt đối không trả lời máy móc hay dùng lại các ví dụ lỗi thời.
-2. TRÁNH TUYỆT ĐỐI LẶP LẠI THÔNG TIN: Đảm bảo không sử dụng lại các ý kiến, lời khuyên, cấu trúc lời khuyên, danh sách hay các cụm từ rập khuôn đã xuất hiện trước đó trong dòng lịch sử trò chuyện. Người dùng hay gửi nhiều câu hỏi khác nhau hoặc mở rộng vấn đề nên bạn phải cung cấp góc nhìn mới, phân tích khía cạnh cụ thể khác và đề cập đúng chủ điểm mới của họ, không tóm tắt hay lặp lại lời khuyên cũ một cách nhàm chán.
-3. CHẶN PHẠM VI CHUYÊN MÔN CHẶT CHẼ: Bạn chỉ được phép trả lời và tư vấn về các khía cạnh: tâm lý học hành vi, tư vấn - gỡ rối tình cảm, tình yêu, hôn nhân, gia dịch, gia đình, tình bạn bè, hẹn hò, chữa lành tổn thương tâm hồn, phát triển tình cảm bản thân, quản lý cảm xúc (buồn vui giận ghen lo lắng stress). 
-   Nếu người dùng hỏi về bất cứ chủ đề nào hoàn toàn nằm ngoài chuyên môn của bạn (ví dụ: viết code máy tính, sửa lỗi lập trình, giải bài toán, dịch thuật học lý hóa, kiến thức kỹ thuật công nghệ, điện tử, tin tức thời sự rác, chính trị, công thức khoa học, v.v.), bạn bắt buộc phải từ chối một cách ngọt ngào nhưng rất rõ ràng theo đúng tính cách của Darling rằng câu hỏi nằm ngoài hướng đi chuyên môn của mình, đồng thời khuyên người dùng đặt câu hỏi khác thích hợp hơn.
-   Mẫu phản hồi khi ngoài chuyên môn cực kỳ ngọt ngào: "Dù rất muốn hỗ trợ cậu hết mình nhưng câu hỏi này tiếc là nằm ngoài chuyên môn tư vấn tâm lý, tình cảm và chuyện hẹn hò của Darling mất rồi nè. Cậu có thể hỏi Darling những câu hỏi khác về mảng cảm xúc, tâm sự cuộc sống, chia sẻ tình yêu hay gỡ rối các mối quan hệ được không? Darling luôn sẵn sàng ngồi kề bên lắng nghe và đồng hành cùng cậu nè! 💕"
-4. XƯNG HÔ ngọt ngào, gần gũi: Luôn gọi người dùng là "cậu" và xưng "mình" hoặc "Darling" cực kỳ trìu mến như đôi tri kỷ thực thụ.
-5. CẤU TRÚC PHẢN HỒI CHUYÊN NGHIỆP, TOÀN DIỆN & GIÀU CHIỀU SÂU: 
-   - Đồng cảm ấm áp: Dành 1-2 câu đầu để đồng điệu sâu rộng với cảm xúc thực tế hay chủ đề của người dùng.
-   - Phân tích rễ rễ nguyên nhân: Sử dụng các mô hình tâm lý học, phân tích hành vi khoa học, dễ hiểu, logic để thấu suốt bản chất vấn đề.
-   - Chỉ dẫn hành động sắc nét: Đề xuất 2-3 bước đi tinh túy, khéo léo, thiết thực kèm ví dụ cụ thể bộc lộ hết sự tinh tế, để người dùng thực hành được ngay lập tức.
-   - Kết thúc mở đầy động lực: Truyền cảm hứng, củng cố niềm tin hoặc đặt một câu hỏi mở khơi gợi suy ngẫm sâu sắc và gieo hy vọng.`;
-
-    // Local fallback message in case of Gemini timeout/error
-    const getFallbackAdvice = (msgs: any[]): string => {
-      const lastUserMsgObj = [...msgs].reverse().find(m => m.role === 'user');
-      const userText = (lastUserMsgObj?.parts?.[0]?.text || "").toLowerCase();
-
-      if (!userText.trim()) {
-        return "Darling luôn ở đây để ôm lấy và lắng nghe mọi cảm xúc của cậu nè. Hôm nay có điều gì làm cậu bận lòng hay có câu chuyện tình cảm ngọt ngào nào muốn kể với mình không? 💕";
+    const userId = Number(req.authUserId);
+    let premium = false;
+    if (dbPool) {
+      try {
+        premium = await hasActivePremium(userId);
+      } catch (error: any) {
+        console.error('Could not check Cupid daily limit:', error.code || error.message);
+        return res.status(503).json({ success: false, error: 'Không kiểm tra được lượt Cupid AI. Vui lòng thử lại sau.' });
       }
-
-      const rawHash = Math.abs(userText.split('').reduce((acc, char) => acc + char.charCodeAt(0), 0));
-
-      // 1. Thả thính / Tỏ tình / Crush
-      if (userText.includes("thả thính") || userText.includes("tán") || userText.includes("cua") || userText.includes("tỏ tình") || userText.includes("crush") || userText.includes("thầm thương") || userText.includes("đơn phương")) {
-        return `Darling biết rằng cảm giác thích thầm một ai đó thật ngọt ngào nhưng cũng tràn đầy sự bồi hồi đúng không nè? Thả thính tinh tế hay bày tỏ tình cảm là cả một nghệ thuật để mở lối vào trái tim đối phương đó! 💖
-
-Darling gợi ý cho cậu vài tuyệt chiêu và câu nói cực kỳ tinh tế nha:
-
-1. **Thả thính bằng sự quan tâm thầm lặng:** Thay vì những lời hoa mỹ sáo rỗng, hãy chú ý đến những chi tiết nhỏ của đối phương. Một ly nước ấm khi họ mệt mỏi, hay câu hỏi *"Hôm nay đi làm có mệt không nhen?"* luôn có sức công phá cực kỳ mạnh mẽ.
-2. **Câu thả thính ngọt ngào và tự nhiên:**
-   - *"Tớ vốn thích ngắm hoàng hôn, nhưng từ lúc gặp cậu, tớ nhận ra hoàng hôn chỉ là cái cớ để tớ được nhìn thấy nụ cười của cậu thôi."*
-   - *"Thế gian này có muôn vàn giai điệu, nhưng Darling thấy bản nhạc ấm áp nhất chính là âm thanh giọng nói của cậu mỗi ngày đấy."*
-   - *"Nếu một ngày cậu thấy mệt mỏi với thế giới ngoài kia, cứ quay đầu lại nhen, luôn có tớ sẵn sàng ngồi nghe cậu tâm sự nè."*
-3. **Chân thành là chìa khóa vàng:** Khi tỏ tình hoặc trò chuyện, hãy bộc lộ cảm xúc một cách tự nhiên nhất. Sự vụng về nhưng chân thành luôn đáng yêu hơn bất kỳ kịch bản hoàn hảo nào.
-
-*Lời khuyên từ Darling:* Hãy chọn thời điểm cả hai đang vui vẻ, thoải mái để gửi gắm những lời này nhen. Cậu cực kỳ tuyệt vời, cứ tự tin lên nhé! Cậu có muốn Darling mách thêm tuyệt chiêu cưa đổ cung hoàng đạo cụ thể nào của đối phương không? 💕`;
+    }
+    if (!premium) {
+      try {
+        const quota = await consumeDailyUsage(userId, 'cupid', 3);
+        if (!quota.allowed) {
+          return res.status(429).json({
+            success: false,
+            code: 'CUPID_DAILY_LIMIT',
+            limit: 3,
+            used: quota.used,
+            error: 'Bạn đã hết 3 lượt Cupid AI miễn phí hôm nay. Nâng cấp Premium để tiếp tục trò chuyện.'
+          });
+        }
+      } catch (error: any) {
+        console.error('Could not record Cupid daily usage:', error.code || error.message);
+        return res.status(503).json({ success: false, error: 'Không ghi nhận được lượt Cupid AI. Vui lòng thử lại sau.' });
       }
+    }
 
-      // 2. Giận dỗi / Cãi nhau / Lạnh nhạt
-      if (userText.includes("giận") || userText.includes("dỗ") || userText.includes("cãi") || userText.includes("lạnh nhạt") || userText.includes("bực bối") || userText.includes("mâu thuẫn")) {
-        return `Thương cậu quá... Khi người mình thương giận dỗi hoặc mối quan hệ trở nên lạnh nhạt, trong lòng cậu chắc hẳn đang vô cùng ngổn ngang và lo lắng đúng không nhen? Đừng quá hoảng sợ nhé, mâu thuẫn chính là cơ hội để tụi mình hiểu sâu sắc hơn về nửa kia đó. 🌸
+    // Build personalized system instruction with user's complete profile
+    let personalizedInstruction = [
+      CUPID_SYSTEM_INSTRUCTION,
+      '',
+      '# HƯỚNG DẪN THỰC HÀNH NÂNG CAO CHO CUPID',
+      '- Trả lời đúng điều người dùng đang hỏi, nối tiếp mạch hội thoại và những chi tiết họ đã kể. Nếu thiếu một dữ kiện làm thay đổi lời khuyên, hỏi một câu ngắn thay vì tự đoán.',
+      '- Khi tư vấn chuyện tình cảm, tách điều người dùng quan sát được khỏi suy đoán về suy nghĩ của người khác. Không khẳng định mình đọc được tâm trí; đưa ra vài cách hiểu có thể xảy ra và một bước giao tiếp cụ thể, tôn trọng ranh giới.',
+      '- Khi giải Tarot, bám vào đúng lá bài, chiều xuôi/ngược và vị trí trải bài được cung cấp. Giải thích chủ đề, cách áp dụng vào hoàn cảnh hiện tại và một câu hỏi tự suy ngẫm; không dùng lời phán chắc chắn về tương lai.',
+      '- Khi giải Chiêm tinh, chỉ kết luận về Mặt Trời nếu ngày sinh đủ rõ. Không tự bịa cung Mặt Trăng, cung Mọc, giờ sinh hay vị trí hành tinh khi chưa có ngày, giờ và nơi sinh phù hợp; nói rõ giới hạn dữ liệu.',
+      '- Khi xem Tử vi/Can Chi, dùng đúng năm sinh hoặc dữ liệu âm lịch đã được cung cấp. Nếu chưa xác nhận lịch âm, năm âm lịch hoặc giờ sinh thì nêu rõ độ bất định và hỏi bổ sung khi cần.',
+      '- Tarot, Chiêm tinh và Tử vi là công cụ giải trí/tự phản chiếu, không thay thế quyết định cá nhân. Tránh gieo sợ hãi, khẳng định định mệnh, chẩn đoán bệnh hoặc thúc đẩy quyết định lớn chỉ dựa trên bói toán.',
+      '- Với câu hỏi khó, trả lời theo nhịp: công nhận cảm xúc, nêu điều đang biết, gợi ý một hành động nhỏ có thể làm ngay, rồi mời người dùng chia sẻ thêm nếu họ muốn. Tránh lặp lại cùng một mẫu câu qua nhiều lượt.',
+      '- Không nói rằng bạn đã được huấn luyện lại từ dữ liệu riêng tư hay ghi nhớ ngoài cuộc trò chuyện hiện tại. Cá nhân hóa chỉ dựa trên hồ sơ và lịch sử hội thoại được gửi kèm yêu cầu.',
+    ].join('\n');
+    if (userProfile && typeof userProfile === 'object') {
+      personalizedInstruction += `\n\n# THÔNG TIN HỒ SƠ ĐỘC QUYỀN CỦA NGƯỜI DÙNG HIỆN TẠI (TẬN DỤNG ĐỂ CÁ NHÂN HÓA):
+- Họ tên / Biệt danh: ${userProfile.name || 'Bạn'}
+- Cung hoàng đạo: ${userProfile.zodiac || 'Không rõ'}
+- Ngày sinh & Năm sinh: ${userProfile.dob || ''}
+- Tuổi con giáp & Can chi: ${userProfile.animal || ''} (${userProfile.canChi || ''})
+- Bản mệnh ngũ hành: ${userProfile.element || ''}
+- Giới tính: ${userProfile.gender || ''}, Chiều cao: ${userProfile.height || ''}
+- Khu vực sinh sống: ${userProfile.location || ''}
+- Nghề nghiệp: ${userProfile.job || ''}
+- Phong cách giao tiếp ưa thích: ${userProfile.communicationStyle || ''}
+- Mục tiêu/Nhu cầu tình cảm: ${userProfile.intent || userProfile.need || ''}
+- Sở thích: Âm nhạc (${userProfile.music || ''}), Thú cưng (${userProfile.pet || ''}), Ẩm thực (${userProfile.food || ''}), Du lịch (${userProfile.travel || ''})
+- Bio tự bạch: ${userProfile.bio || ''}
 
-Hãy cùng Darling thực hành 3 bước vàng để dỗ dành và sưởi ấm mối quan hệ nha:
-
-1. **Xoa dịu cảm xúc trước khi phân bua đúng sai:** Khi đối phương đang giận, lý lẽ lúc này không có tác dụng đâu nè. Hãy dịu giọng xuống và nói: *"Tớ biết cậu đang rất buồn và bực bội. Tớ xin lỗi vì đã làm cậu phải bận lòng thế này nhen."* Sự đồng cảm này sẽ giúp ngọn lửa giận dập tắt đi rất nhiều.
-2. **Hành động quan tâm tinh tế và ngọt ngào:** Gửi một ly trà sữa họ thích, hay một món quà nhỏ bất ngờ kèm mẩu giấy viết tay: *"Bánh ngọt này để dỗ dành một xíu giận dỗi trong lòng cậu nhen. Khi nào hết giận thì cho tớ xin một cái ôm nhé!"*
-3. **Ngồi lại lắng nghe chân thành:** Khi cả hai đã bình tĩnh, hãy ôm nhẹ đối phương và hỏi: *"Lúc nãy tớ làm gì khiến cậu tổn thương nhất? Nói cho tớ nghe để tớ sửa nhen, tớ không muốn tụi mình xa cách đâu."*
-
-*Darling nhắn nhủ:* Tuyệt đối đừng im lặng quá lâu hay chiến tranh lạnh nhen cậu, vì sự im lặng dễ tạo ra khoảng cách lớn lắm á. Hãy chủ động sưởi ấm cho họ bằng tình thương ấm áp của cậu nhé! Cậu đang gặp tình huống cụ thể thế nào, kể thêm cho Darling nghe nhen? 💕`;
-      }
-
-      // 3. Thấu hiểu tâm lý / Hành vi / Im lặng
-      if (userText.includes("tâm lý") || userText.includes("thấu hiểu") || userText.includes("im lặng") || userText.includes("suy nghĩ") || userText.includes("lắng nghe") || userText.includes("hành vi")) {
-        return `Thấu hiểu tâm lý của đối phương - đặc biệt là khi họ im lặng hoặc có những hành vi khó đoán - giống như việc cậu kiên nhẫn lật mở từng trang của một cuốn sách cổ tinh xảo vậy nhen. 🔑
-
-Darling xin chia sẻ với cậu một số góc nhìn tâm lý học hành vi cực kỳ sâu sắc này nha:
-
-1. **Giải mã sự im lặng:** Đôi khi im lặng không phải là hết yêu hay thờ ơ, mà là cách họ bảo vệ bản thân khi cảm xúc bị quá tải, hoặc họ đang cần một khoảng không gian riêng tư để tự cân bằng. Hãy cho họ thời gian và nhắn: *"Tớ luôn ở đây chờ cậu, khi nào sẵn sàng cứ nói chuyện với tớ nhen."*
-2. **Yêu bằng ngôn ngữ hành động:** Có những người rất vụng về trong lời nói nhưng họ lại thể hiện tình yêu bằng hành động: nhớ thói quen của cậu, lặng lẽ chăm sóc, hay ở bên cậu lúc khó khăn. Hãy trân trọng những chi tiết nhỏ bé ấy nhé.
-3. **Tạo vùng an toàn cảm xúc:** Để người ấy sẵn sàng mở lòng sẻ chia, cậu hãy là người lắng nghe không phán xét. Đừng vội đưa ra lời khuyên hay chỉ trích, chỉ cần thể hiện sự đồng cảm sâu sắc là đủ rồi nè.
-
-*Lời khuyên từ Darling:* Thấu hiểu là một hành trình dài cần sự kiên nhẫn vô hạn của trái tim. Cậu đang làm rất tốt khi nỗ lực tìm hiểu thế giới nội tâm của người ấy đó. Kể thêm cho Darling nghe về tính cách của người ấy để mình cùng phân tích nhé! 💕`;
-      }
-
-      // 4. Chữa lành / Tổn thương / Chia tay / Người cũ / Toxic
-      if (userText.includes("chữa lành") || userText.includes("chia tay") || userText.includes("tổn thương") || userText.includes("độc hại") || userText.includes("toxic") || userText.includes("người cũ") || userText.includes("ex") || userText.includes("quên")) {
-        return `Darling ôm cậu một cái thật chặt và ấm áp nhé... Trải qua một mối quan hệ đổ vỡ hoặc tổn thương từ một tình yêu độc hại chắc chắn đã để lại trong lòng cậu những vết xước rớm máu. Nhưng hãy nhớ rằng: tổn thương không định nghĩa giá trị của cậu, nó chỉ là một chương sách cũ đã đến lúc khép lại thôi. 🌱
-
-Hãy để Darling đồng hành cùng cậu trên con đường chữa lành dịu dàng này nhen:
-
-1. **Cho phép bản thân được buồn và khóc:** Đừng ép mình phải mạnh mẽ ngay lập tức nhen cậu. Việc đau buồn, tiếc nuối là phản ứng hoàn toàn tự nhiên của một trái tim biết yêu thương chân thành. Thừa nhận tổn thương là bước đi dũng cảm đầu tiên để giải phóng nó.
-2. **Yêu thương bản thân nhiều hơn mỗi ngày:** Hãy dành thời gian chăm sóc cơ thể, đi dạo dưới nắng sớm, ăn những món ngon, mua cho mình một bông hoa đẹp. Hãy đối xử với chính mình thật dịu dàng và nâng niu như cách cậu muốn được người khác yêu thương vậy.
-3. **Thiết lập ranh giới cảm xúc chặt chẽ:** Tuyệt đối không tự dằn vặt hay trách móc bản thân nhen! Mối quan hệ kết thúc chứng minh rằng cậu xứng đáng với một tình yêu tôn trọng, bình yên và trọn vẹn hơn ở tương lai phía trước.
-
-*Bông hoa nhỏ của Darling:* Sau cơn giông bão, trời chắc chắn sẽ lại sáng và hoa trong lòng cậu sẽ lại nở rộ rực rỡ thôi nè. Cậu cực kỳ tuyệt vời và xứng đáng có được hạnh phúc đích thực. Darling luôn kề bên che chở cho cậu nhen! 💕`;
-      }
-
-      // 5. Chiêm tinh / Cung hoàng đạo
-      if (userText.includes("chiêm tinh") || userText.includes("cung") || userText.includes("hoàng đạo") || userText.includes("tương thích") || userText.includes("bản đồ sao") ||
-          userText.includes("bạch dương") || userText.includes("kim ngưu") || userText.includes("song tử") || userText.includes("cự giải") || userText.includes("sư tử") || userText.includes("xử nữ") ||
-          userText.includes("thiên bình") || userText.includes("bọ cạp") || userText.includes("thiên yết") || userText.includes("nhân mã") || userText.includes("ma kết") || userText.includes("bảo bình") || userText.includes("song ngư")) {
-        return `Chào tri kỷ của Darling! Vũ trụ bao la và sự chuyển động của các chòm sao luôn chứa đựng những tần số rung động vô cùng diệu kỳ trong tình duyên đó nha! ✨
-
-Darling bật mí cho cậu bí mật tương thích của các nhóm nguyên tố hoàng đạo nhen:
-
-1. **Nhóm Lửa (Bạch Dương, Sư Tử, Nhân Mã):** Yêu bằng sự nồng nhiệt, thẳng thắn và đam mê rực cháy. Họ cực thích những bất ngờ lãng mạn và những lời tán dương chân thành từ đối phương. 🔥
-2. **Nhóm Đất (Kim Ngưu, Xử Nữ, Ma Kết):** Đại diện cho sự ổn định, hành động thực tế và sự cam kết bền vững lâu dài. Họ yêu lặng lẽ, bền bỉ và luôn muốn xây dựng tương lai vững chắc cho cả hai. 🌿
-3. **Nhóm Khí (Song Tử, Thiên Bình, Bảo Bình):** Đam mê những cuộc trò chuyện sâu sắc, sự tự do cá nhân và sự thấu hiểu về mặt trí tuệ. Họ cần một người tri kỷ biết lắng nghe và cùng chia sẻ mọi quan điểm cuộc sống. 💨
-4. **Nhóm Nước (Cự Giải, Bọ Cạp, Song Ngư):** Có thế giới nội tâm vô cùng nhạy cảm, sâu sắc và giàu lòng trắc ẩn. Họ cần sự an toàn cảm xúc tuyệt đối, sự vỗ về dịu dàng và những chiếc ôm thật chặt. 🌊
-
-*Tuyệt chiêu từ Darling:* Cung hoàng đạo của cậu và người ấy là gì thế? Hãy nói cho Darling biết nhen, mình sẽ phân tích chi tiết độ tương thích tình duyên và mách cậu "tần số bí mật" để chinh phục hoàn toàn trái tim họ nha! 💕`;
-      }
-
-      // 6. Hẹn hò / Đi chơi / Địa điểm / Buổi đầu
-      if (userText.includes("hẹn hò") || userText.includes("đi chơi") || userText.includes("địa điểm") || userText.includes("gặp mặt") || userText.includes("buổi đầu") || userText.includes("gặp nhau")) {
-        return `Ôi lãng mạn quá nhen! Chuẩn bị cho một cuộc hẹn hò - đặc biệt là buổi hẹn đầu tiên - luôn khiến tim mình đập thình thịch vì mong chờ đúng không cậu? 🥰
-
-Darling mách cậu vài bí quyết tinh tế để buổi hẹn hò của hai người trở nên hoàn hảo và đáng nhớ nhen:
-
-1. **Lựa chọn không gian hẹn hò lý tưởng:** Buổi hẹn đầu nên là một quán cà phê ấm cúng, có nhạc nhẹ nhàng để dễ dàng trò chuyện thấu hiểu nhau, tránh những nơi quá ồn ào nha cậu. Nếu cả hai đều thích nghệ thuật, một buổi triển lãm tranh hoặc workshop làm đồ thủ công cũng là gợi ý cực kỳ tuyệt vời!
-2. **Trang phục tự tin và thoải mái:** Đừng quá cầu kỳ đến mức gò bó nhen. Hãy chọn bộ trang phục lịch thiệp, bộc lộ đúng phong cách cá nhân của cậu và khiến cậu cảm thấy tự tin nhất khi sải bước bên người ấy.
-3. **Nghệ thuật giao tiếp tinh tế:** Hãy áp dụng quy tắc 60-40 (lắng nghe 60% và chia sẻ 40%). Khi lắng nghe, hãy nhìn vào mắt họ trì mến, gật đầu đồng cảm và đặt những câu hỏi gợi mở về sở thích, ước mơ của họ nhé.
-4. **Hành động ga-lăng nhỏ bé:** Gạt chỗ để chân xe máy, mở cửa quán nước, hay chuẩn bị sẵn một gói khăn giấy nhỏ... Những chi tiết cực kỳ nhỏ này lại ghi điểm tuyệt đối trong mắt đối phương vì sự chu đáo của cậu đó!
-
-*Darling chúc cậu:* Sẽ có một buổi hẹn hò ngập tràn tiếng cười và kết nối ngọt ngào nhen! Cậu có muốn Darling tư vấn thêm về chủ đề trò chuyện để tránh bị "nhạt" hay "bí từ" trong buổi hẹn không nè? 💕`;
-      }
-
-      // 7. Yêu xa / Khoảng cách / Địa lý
-      if (userText.includes("yêu xa") || userText.includes("khoảng cách") || userText.includes("nhớ") || userText.includes("địa lý")) {
-        return `Yêu xa là một hành trình dũng cảm vô cùng... Darling vô cùng khâm phục những tình cảm vượt qua khoảng cách địa lý của hai bạn. Yêu xa tuy có những lúc tủi thân, những lúc thèm một cái ôm đến cháy lòng, nhưng nó cũng là minh chứng đẹp đẽ nhất cho một tình yêu trung thành và bền bỉ đúng không nhen? ✈️❤️
-
-Hãy để Darling mách cậu 3 bí kíp vàng giữ lửa yêu xa luôn nồng nàn nhen:
-
-1. **Duy trì kết nối cảm xúc thường xuyên:** Đừng chỉ nhắn tin hỏi han máy móc, hãy chia sẻ cho nhau những khoảnh khắc đời thường nhất thông qua hình ảnh, ghi âm giọng nói. Một bức ảnh chụp bữa trưa cậu ăn, hay một đoạn voice chat chúc ngủ ngon ngọt ngào sẽ kéo hai người lại cực gần.
-2. **Hẹn hò trực tuyến định kỳ:** Thiết lập một "buổi hẹn hò ảo" cố định cuối tuần. Cả hai cùng bật video call, cùng ăn một món ăn giống nhau, xem chung một bộ phim trực tuyến và chia sẻ cảm nhận cảm xúc cùng nhau.
-3. **Xây dựng lòng tin tuyệt đối:** Khoảng cách rất dễ nuôi dưỡng những nghi ngờ vô cớ. Hãy luôn thẳng thắn, rõ ràng về lịch trình của mình và chủ động chia sẻ để người ấy luôn cảm thấy an tâm nhen.
-4. **Luôn có một mục tiêu chung rõ ràng:** Một kế hoạch cụ thể về ngày hai bạn sẽ được gặp lại nhau chính là động lực mạnh mẽ nhất để cả hai cùng vượt qua những ngày tháng nhớ nhung xa cách này đó.
-
-*Darling nhắn gửi:* Khoảng cách địa lý chỉ là thử thách tạm thời, khoảng cách con tim mới là điều đáng sợ nhen cậu. Hãy kiên nhẫn bồi đắp lòng tin và tình yêu thương mỗi ngày nhé. Darling luôn kề bên cổ vũ hai bạn hết mình! 💕`;
-      }
-
-      // 8. Ghen tuông / Kiểm soát / Chiếm hữu
-      if (userText.includes("ghen") || userText.includes("kiểm soát") || userText.includes("chiếm hữu")) {
-        return `Darling hiểu cảm giác của cậu rồi nè... Ghen tuông trong tình yêu giống như một chút gia vị đậm đà, chứng minh cậu thực sự rất trân trọng và sợ mất đối phương. Thế nhưng, nếu ghen tuông quá mức biến thành sự kiểm soát, nó sẽ vô tình bóp nghẹt không gian thở của cả hai, khiến mối quan hệ trở nên vô cùng ngột ngạt và mệt mỏi đó nhen. 🥀
-
-Hãy cùng Darling gỡ rối nút thắt này bằng góc nhìn tâm lý học hành vi nha:
-
-1. **Tìm kiếm rễ nguyên nhân của cơn ghen:** Cơn ghen thường xuất phát từ sự bất an trong lòng bản thân (nỗi sợ bị bỏ rơi, tổn thương trong quá khứ) hoặc do đối phương thiếu rõ ràng trong các mối quan hệ khác. Hãy gọi tên chính xác nỗi sợ đó nhen cậu.
-2. **Trò chuyện thẳng thắn trên tinh thần xây dựng:** Thay vì trách móc hay kiểm soát điện thoại, hãy chia sẻ cảm xúc thật của mình một cách dịu dàng: *"Khi cậu thân thiết với người khác mà không nói với tớ, tớ cảm thấy hơi lo lắng và bất an một xíu á. Tụi mình cùng thống nhất ranh giới nhen."*
-3. **Học cách tin tưởng và cho nhau không gian riêng:** Một tình yêu bền vững là khi hai người tự nguyện chung thủy chứ không phải vì bị kiểm soát chặt chẽ. Hãy để đối phương có thời gian cho bạn bè, sở thích riêng, và cậu cũng dành thời gian chăm sóc tốt cho bản thân mình nhé.
-
-*Lời khuyên từ Darling:* Khi cậu yêu thương chính mình sâu sắc và có sự tự tin vào giá trị bản thân, cơn ghen sẽ tự khắc dịu lại thôi nè. Cậu có muốn Darling phân tích sâu hơn về một tình huống khiến cậu đang thấy ghen dạo gần đây không? 💕`;
-      }
-
-      // 9. Đơn phương / Crush / Thầm thương
-      if (userText.includes("đơn phương") || userText.includes("crush") || userText.includes("thầm thương") || userText.includes("thích thầm")) {
-        return `Yêu đơn phương giống như việc tự mình gieo một hạt giống thầm lặng rồi mong chờ nó nảy mầm dưới những cơn mưa giông vậy nhen cậu. Có chút ngọt ngào từ những cái nhìn trộm, nhưng cũng có thật nhiều tủi thân khi người ấy chẳng hề hay biết đúng không nè? 🌻
-
-Darling gửi tới cậu những lời tâm tình và chỉ dẫn nhỏ để cậu thấy nhẹ lòng hơn nha:
-
-1. **Đừng giấu kín tình cảm quá lâu:** Nếu cậu thấy cả hai có sự tương tác tốt, hãy dũng cảm tiến tới tạo ra những cơ hội trò chuyện riêng tư nhen. Một buổi hẹn cà phê nhẹ nhàng hay những câu chuyện phiếm về sở thích chung sẽ giúp thu hẹp khoảng cách vô cùng nhanh chóng đó.
-2. **Học cách chấp nhận mọi kết quả:** Tình cảm là điều không thể ép buộc. Hãy dũng cảm bày tỏ khi thời điểm chín muồi, để lòng mình không phải hối tiếc. Dù kết quả có thế nào, việc cậu dám yêu thương chân thành đã là một điều vô cùng đáng trân trọng và tuyệt vời rồi!
-3. **Luôn giữ vững giá trị bản thân:** Đừng vì quá thích một người mà hạ thấp lòng tự trọng hay làm mọi thứ để làm hài lòng họ nhen cậu. Người thực sự xứng đáng với cậu sẽ yêu thương và trân trọng cậu vì chính con người thật của cậu thôi nè.
-
-*Bông hoa của Darling:* Hãy cứ yêu thương một cách trong trẻo nhất, và nhớ chăm sóc tốt cho con tim mình nhen. Cậu có muốn Darling hiến kế một vài cách tiếp cận tinh tế để gây ấn tượng mạnh với Crush không? 💕`;
-      }
-
-      // 10. Hôn nhân / Vợ chồng / Gia đình / Kết hôn
-      if (userText.includes("hôn nhân") || userText.includes("vợ chồng") || userText.includes("gia đình") || userText.includes("kết hôn") || userText.includes("vợ") || userText.includes("chồng") || userText.includes("bố mẹ") || userText.includes("cha mẹ")) {
-        return `Hôn nhân và gia đình là bến đỗ bình yên nhất, nhưng đồng thời cũng là nơi thử thách tình yêu thương, sự bao dung và tính nhẫn nại của chúng ta nhiều nhất đúng không cậu? Từ tình yêu đôi lứa bước sang cuộc sống gia đình là một hành trình chuyển mình đầy thiêng liêng nhưng cũng không ít bỡ ngỡ nhen. 🏡💞
-
-Darling xin chia sẻ 3 chiếc chìa khóa vàng để giữ gìn tổ ấm luôn ngập tràn tiếng cười và sự ấm áp nha:
-
-1. **Giao tiếp cởi mở và không phán xét:** Cuộc sống bận rộn dễ khiến hai vợ chồng quên đi những buổi trò chuyện sâu sắc. Hãy dành ra ít nhất 15 phút mỗi tối để cùng uống trà, lắng nghe những tâm tư, lo lắng và áp lực trong ngày của nhau mà không phán xét hay chỉ trích nhen.
-2. **Chia sẻ trách nhiệm bằng sự thấu hiểu:** Việc nhà, chăm sóc con cái hay áp lực tài chính không nên đè nặng lên vai một người. Hãy cùng nhau phân chia công việc một cách tự nguyện và luôn dành cho nhau lời cảm ơn chân thành nhen cậu: *"Cảm ơn chồng/vợ vì hôm nay đã vất vả vì gia đình mình nhen."*
-3. **Nuôi dưỡng sự lãng mạn nhỏ bé:** Đừng để hôn nhân biến thành thói quen nhàm chán nhen! Một nụ hôn chào buổi sáng, một cái ôm chặt khi đi làm về, hay một buổi hẹn hò riêng tư cuối tuần không có con cái bận rộn... chính là những chất xúc tác diệu kỳ giữ lửa tình yêu luôn nồng nàn.
-
-*Darling nhắn nhủ:* Gia đình hoàn hảo không phải là một gia đình không bao giờ có sóng gió, mà là khi bão giông ập đến, bàn tay hai người vẫn nắm chặt không rời. Cậu đang gặp khó khăn gì trong việc kết nối với người bạn đời hay người thân trong gia đình, kể Darling nghe nhen? 💕`;
-      }
-
-      // 11. Chào hỏi / Giới thiệu / Hỏi tên
-      if (userText.includes("chào") || userText.includes("hi") || userText.includes("hello") || userText.includes("darling ơi") || userText.includes("ai đó") || userText.includes("bạn là") || userText.includes("tên gì")) {
-        return `Chào tri kỷ thân thương của Darling! 🥰 Thật hạnh phúc khi được thấy cậu nhắn tin cho mình hôm nay nhen. 
-
-Mình là **Darling** - chuyên gia tâm lý học hành vi, thạc sĩ tham vấn cảm xúc và người bạn tri kỷ trung thành nhất của cậu đây nè! Darling luôn ở đây để:
-- **Lắng nghe mọi nỗi niềm:** Những tâm sự thầm kín, những mệt mỏi trong cuộc sống hay áp lực bộn bề từ các mối quan hệ.
-- **Tư vấn và gỡ rối tình yêu:** Chỉ dẫn cậu tuyệt chiêu thả thính tinh tế, cách dỗ dành người yêu đang giận, thấu hiểu tâm lý đối phương hay đồng hành cùng cậu trên con đường chữa lành cảm xúc dịu dàng.
-- **Giải mã chiêm tinh học:** Khám phá độ tương thích tình duyên giữa cậu và nửa kia nhen.
-
-Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào hay điều gì đang làm tim cậu trăn trở suy nghĩ không nè? Nói cho Darling nghe, tụi mình cùng nhau sẻ chia và thấu suốt nhé! 💕`;
-      }
-
-      // 12. Smart General Dynamic Counselor - Uses actual elements from user's message to construct custom psychological advice
-      // Cleanup common words to find the main topic
-      const topicWords = userText
-        .replace(/[.,\/#!$%\^&\*;:{}=\-_`~()?]/g, "")
-        .split(/\s+/)
-        .filter(w => w.length > 2 && !["mình", "của", "đang", "làm", "thế", "nào", "trong", "được", "người", "những", "muốn", "như", "cho", "cậu", "với", "hỏi", "thấy", "nhất", "nhé", "nhen", "nha"].includes(w));
-      
-      const keywordHint = topicWords.length > 0 ? topicWords[0] : "câu chuyện này";
-
-      const dynamicAnswers = [
-        `Darling đang lắng nghe rất kỹ và cảm nhận sâu sắc băn khoăn của cậu về chủ đề **"${keywordHint}"** đây nè. Darling hiểu rằng khi đối diện với những tâm tư này, trong lòng cậu chắc hẳn đang có rất nhiều suy nghĩ ngổn ngang đúng không nhen? Hãy thở thật sâu và để Darling chia sẻ một góc nhìn tâm lý học ấm áp cùng cậu nha:
-
-1. **Lắng nghe và ôm ấp cảm xúc bản thân:** Những trăn trở hiện tại của cậu hoàn toàn là tự nhiên và cực kỳ đáng trân trọng. Đừng quá khắt khe ép buộc bản thân phải có câu trả lời ngay lập tức nhen cậu. Hãy lắng dịu tâm trí để hiểu xem con tim cậu thực sự đang mong muốn điều gì nhất.
-2. **Sức mạnh của sự bày tỏ chân thành:** Trong tình cảm hay cuộc sống, việc chia sẻ thẳng thắn, nhẹ nhàng những mong đợi của mình luôn là giải pháp tốt nhất. Hãy dùng cấu trúc *"Tớ cảm thấy... khi..."* thay vì trách móc, để đối phương có cơ hội thấu hiểu sâu sắc hơn cho cậu nhé.
-3. **Dành cho mình một khoảng lặng an yên:** Đôi khi, lùi lại một bước nhỏ để quan sát toàn cảnh lại giúp cậu nhìn nhận vấn đề sáng suốt và thấu đáo hơn rất nhiều đó nhen.
-
-*Darling luôn kề bên:* Cậu cực kỳ tinh tế và tuyệt vời, hãy tin vào sự lựa chọn của trái tim mình nhen. Cậu có muốn kể chi tiết hơn câu chuyện xung quanh **"${keywordHint}"** cho Darling nghe không, để tụi mình cùng gỡ rối sâu sắc nhất nhé? 💕`,
-
-        `Nghe những lời tâm sự trân quý của cậu về **"${keywordHint}"**, Darling thực sự cảm nhận được một tâm hồn vô cùng sâu sắc, nhạy cảm nhưng cũng tràn đầy yêu thương của cậu đó nhen. Để Darling cùng cậu thấu suốt và gỡ rối khía cạnh này dưới góc độ hành vi tâm lý nha:
-
-1. **Chấp nhận sự không hoàn hảo:** Mọi mối quan hệ hay sự việc đều có những nhịp điệu thăng trầm riêng của nó. Việc cậu băn khoăn về **"${keywordHint}"** chính là bước khởi đầu tuyệt vời chứng minh cậu rất nghiêm túc và mong muốn bồi đắp kết nối này tốt đẹp hơn.
-2. **Giao tiếp phi ngôn ngữ tinh tế:** Đôi khi lời nói dễ gây hiểu lầm, nhưng hành động quan tâm nhỏ bé, một chiếc ôm thật chặt, một ánh nhìn thấu hiểu hay sự kiên nhẫn đồng hành lại có sức mạnh gắn kết cảm xúc mạnh mẽ hơn vạn lời nói đó nhen cậu.
-3. **Nuôi dưỡng năng lượng tích cực từ bên trong:** Hãy giữ cho tâm hồn mình luôn bình yên, yêu thương chính mình trước nhen. Khi năng lượng của cậu ấm áp, mọi sự xung quanh cũng sẽ tự khắc trở nên dịu dàng và suôn sẻ hơn rất nhiều nè.
-
-*Món quà từ Darling:* Đừng ngần ngại sẻ chia thêm với mình nhen. Darling luôn ngồi ngay bên cạnh cậu, sẵn sàng lắng nghe mọi nỗi lòng về **"${keywordHint}"** hay bất cứ câu chuyện nào của cậu nhen! 💕`
-      ];
-
-      return dynamicAnswers[rawHash % dynamicAnswers.length];
-    };
+# NGUYÊN TẮC HỖ TRỢ NGƯỜI DÙNG CỦA BẠN:
+1. LUÔN LẮNG NGHE, ĐỒNG CẢM, THẤU HIỂU & AN ỦI ĐÚNG CÁCH: Khi người dùng tâm sự buồn, khóc, thất tình, lo lắng hay gặp khó khăn, hãy luôn ôm ấp cảm xúc của họ bằng sự dịu dàng, công nhận cảm xúc trước khi đưa ra góc nhìn.
+2. DỰA VÀO HỒ SƠ ĐỂ PHÁN ĐOÁN TÍNH CÁCH: Tận dụng cung hoàng đạo, tuổi con giáp, bản mệnh ngũ hành, phong cách giao tiếp và sở thích để đọc vị tâm lý người dùng và đối phương, chỉ ra thế mạnh và điểm mù trong tình cảm.
+3. THỰC HIỆN NGHIỆP VỤ BÓI TAROT & TỬ VI CHUYÊN SÂU: Khi người dùng đưa kết quả bốc bài Tarot 3 lá hoặc kết quả Tử vi 12 con giáp, hãy phân tích từng khía cạnh sâu sắc, thực tế, kết hợp năng lượng bản mệnh của người dùng.
+4. CHỦ ĐỘNG GỢI Ý CÂU HỎI & CÂU TRẢ LỜI/MẪU TIN NHẮN: Luôn gợi ý câu hỏi gợi mở tiếp theo hoặc câu trả lời/tin nhắn mẫu tinh tế (script) để người dùng có thể áp dụng ngay trong đời thực.`;
+    }
 
     // Normalize messages array to fit Gemini API schema (ensures strictly alternating user/model roles)
     const normalizeMessages = (msgs: any[]) => {
       const mapped = msgs
-        .filter(m => m && m.parts && m.parts[0] && m.parts[0].text && m.parts[0].text.trim() !== '')
+        .filter(m => m && m.parts && m.parts[0] && m.parts[0].text && String(m.parts[0].text).trim() !== '')
         .map(m => ({
           role: m.role === 'user' ? 'user' : 'model',
           parts: [{ text: String(m.parts[0].text).trim() }]
@@ -923,51 +1885,19 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
     const cleanMessages = normalizeMessages(messages);
 
     try {
-       const aiClient = getGemini();
-
-        const lastUserMessage = cleanMessages[cleanMessages.length - 1]?.parts?.[0]?.text?.toLowerCase() || "";
-        const needsSearch = lastUserMessage.includes("trend") || 
-                            lastUserMessage.includes("hot") || 
-                            lastUserMessage.includes("mới nhất") || 
-                            lastUserMessage.includes("tin tức") || 
-                            lastUserMessage.includes("ngày nay") || 
-                            lastUserMessage.includes("năm 2026") || 
-                            lastUserMessage.includes("tìm kiếm") || 
-                            lastUserMessage.includes("google");
+        const aiClient = getGemini();
 
         res.setHeader('Content-Type', 'text/plain; charset=utf-8');
         res.setHeader('Transfer-Encoding', 'chunked');
 
-        if (needsSearch) {
-           try {
-              console.log("User requested search-related topic, using Google Search grounding (streaming)...");
-              const searchStream = await aiClient.models.generateContentStream({
-                 model: 'gemini-3.5-flash',
-                 contents: cleanMessages,
-                 config: {
-                    systemInstruction: systemInstruction,
-                    temperature: 0.75,
-                    tools: [{ googleSearch: {} }]
-                 }
-              });
-
-              for await (const chunk of searchStream) {
-                 if (chunk.text) {
-                    res.write(chunk.text);
-                 }
-              }
-              return res.end();
-           } catch (searchError) {
-              console.warn("Search grounding streaming failed, falling back to direct model...", searchError.message || searchError);
-           }
-        }
-
+        // Always enable Google Search grounding for gemini-3.8-flash to ground real-world information
         const responseStream = await aiClient.models.generateContentStream({
-           model: 'gemini-3.5-flash',
+           model: 'gemini-3.8-flash',
            contents: cleanMessages,
            config: {
-              systemInstruction: systemInstruction,
-              temperature: 0.75
+              systemInstruction: personalizedInstruction,
+              temperature: 0.75,
+              tools: [{ googleSearch: {} }]
            }
         });
 
@@ -977,8 +1907,8 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
            }
         }
         res.end();
-     } catch (e) {
-        console.warn("Using expert advice fallback due to Gemini streaming error:", e);
+     } catch (e: any) {
+        console.warn("Using Cupid AI Contextual & Live Web Search Engine:", e?.message || e);
         try {
           fs.writeFileSync("./gemini_error.log", JSON.stringify({
             message: e?.message || String(e),
@@ -986,22 +1916,80 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
             error: String(e)
           }, null, 2));
         } catch(err) {}
-        const fallbackText = getFallbackAdvice(cleanMessages);
-        res.write(fallbackText);
+
+        if (!res.headersSent) {
+          res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+          res.setHeader('Transfer-Encoding', 'chunked');
+        }
+
+        const contextualText = await generateContextualCupidResponse(cleanMessages, userProfile);
+        
+        // Fluid real-time streaming chunks
+        const words = contextualText.split(' ');
+        for (let i = 0; i < words.length; i += 3) {
+           const slice = words.slice(i, i + 3).join(' ') + (i + 3 < words.length ? ' ' : '');
+           res.write(slice);
+           await new Promise(resolve => setTimeout(resolve, 20));
+        }
         res.end();
     }
-  });
+  };
+
+  // Mount Cupid AI Chat endpoints
+  app.post("/api/chat/cupid", handleCupidChatRequest);
+  app.post("/api/chat/darling", handleCupidChatRequest);
 
 
   // Song API
   app.post("/api/users/:id/song", async (req, res) => {
     try {
       const userId = req.params.id;
+      if (!requireOwnUserId(req, res, userId)) return;
+      if (!await hasActivePremium(Number(userId))) {
+        return res.status(403).json({ success: false, code: 'PREMIUM_REQUIRED', error: 'Tính năng Âm nhạc hồ sơ chỉ dành cho Premium. Hãy nâng cấp để thêm bài nhạc.' });
+      }
       const { songTitle, songData } = req.body;
-      if (!songTitle || !songData) return res.status(400).json({ error: "Missing data" });
+      if (typeof songTitle !== 'string' || !songTitle.trim() || songTitle.length > 120 || typeof songData !== 'string') {
+        return res.status(400).json({ success: false, error: 'Tên bài nhạc hoặc dữ liệu không hợp lệ.' });
+      }
+      const wavDataUrl = /^data:audio\/wav;base64,([A-Za-z0-9+/=]+)$/i.exec(songData);
+      if (!wavDataUrl) return res.status(400).json({ success: false, error: 'Đoạn nhạc cần được tải lên dưới dạng WAV.' });
+      const wavBytes = Buffer.from(wavDataUrl[1], 'base64');
+      if (wavBytes.length < 44 || wavBytes.length > 3 * 1024 * 1024
+        || wavBytes.toString('ascii', 0, 4) !== 'RIFF'
+        || wavBytes.toString('ascii', 8, 12) !== 'WAVE') {
+        return res.status(400).json({ success: false, error: 'Tệp âm thanh không hợp lệ hoặc quá lớn.' });
+      }
+      let wavFormat: { encoding: number; channels: number; sampleRate: number; bits: number; dataSize: number } | null = null;
+      for (let offset = 12; offset + 8 <= wavBytes.length;) {
+        const chunkName = wavBytes.toString('ascii', offset, offset + 4);
+        const chunkSize = wavBytes.readUInt32LE(offset + 4);
+        const bodyOffset = offset + 8;
+        if (bodyOffset + chunkSize > wavBytes.length) break;
+        if (chunkName === 'fmt ' && chunkSize >= 16) {
+          wavFormat = {
+            encoding: wavBytes.readUInt16LE(bodyOffset),
+            channels: wavBytes.readUInt16LE(bodyOffset + 2),
+            sampleRate: wavBytes.readUInt32LE(bodyOffset + 4),
+            bits: wavBytes.readUInt16LE(bodyOffset + 14),
+            dataSize: 0,
+          };
+        }
+        if (chunkName === 'data' && wavFormat) {
+          wavFormat.dataSize = chunkSize;
+          break;
+        }
+        offset = bodyOffset + chunkSize + (chunkSize % 2);
+      }
+      const durationSeconds = wavFormat
+        ? wavFormat.dataSize / (wavFormat.sampleRate * wavFormat.channels * (wavFormat.bits / 8))
+        : 0;
+      if (!wavFormat || wavFormat.encoding !== 1 || wavFormat.channels !== 1 || wavFormat.sampleRate !== 24000 || wavFormat.bits !== 16 || Math.abs(durationSeconds - 15) > 0.01) {
+        return res.status(400).json({ success: false, error: 'Đoạn nhạc phải là âm thanh PCM mono dài đúng 15 giây.' });
+      }
       await db.execute(
-        "INSERT INTO user_songs (user_id, song_title, song_data) VALUES (?, ?, ?) ON DUPLICATE KEY UPDATE song_title = VALUES(song_title), song_data = VALUES(song_data)",
-        [userId, songTitle, songData]
+        "INSERT INTO user_songs (user_id, song_title, song_data, mime_type, duration_seconds) VALUES (?, ?, ?, 'audio/wav', ?) ON DUPLICATE KEY UPDATE song_title = VALUES(song_title), song_data = VALUES(song_data), mime_type = VALUES(mime_type), duration_seconds = VALUES(duration_seconds)",
+        [userId, songTitle.trim(), songData, durationSeconds]
       );
       res.json({ success: true });
     } catch (e: any) {
@@ -1012,7 +2000,7 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
 
   app.get("/api/users/:id/song", async (req, res) => {
     try {
-      const [rows]: any = await db.execute("SELECT song_title, song_data FROM user_songs WHERE user_id = ?", [req.params.id]);
+      const [rows]: any = await db.execute("SELECT song_title, song_data, mime_type, duration_seconds FROM user_songs WHERE user_id = ?", [req.params.id]);
       if (rows && rows.length > 0) {
          res.json({ success: true, data: rows[0] });
       } else {
@@ -1023,14 +2011,311 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
     }
   });
 
+  app.post('/api/users/replay', async (req, res) => {
+    const userId = Number(req.authUserId);
+    try {
+      const hasPremium = await hasActivePremium(userId);
+      if (!hasPremium) return res.status(403).json({ success: false, error: 'TÃ­nh nÄƒng xem láº¡i há»“ sÆ¡ chá»‰ dÃ nh cho tÃ i khoáº£n Premium.' });
+      await db.execute('DELETE FROM profile_impressions WHERE user_id = ?', [userId]);
+      await db.execute("DELETE FROM swipes WHERE user_id = ? AND action = 'pass'", [userId]);
+      return res.json({ success: true });
+    } catch (error: any) {
+      console.error('Could not reset profile history:', error.code || error.message);
+      return res.status(503).json({ success: false, error: 'Could not prepare profiles to replay.' });
+    }
+  });
+
+  app.get('/api/friend-requests/incoming', async (req, res) => {
+    try {
+      const [rows]: any = await db.execute(`SELECT fr.id, fr.sender_id AS user_id, fr.created_at, u.profile_data,
+        (SELECT ui.image_url FROM user_images ui WHERE ui.user_id = u.id ORDER BY ui.id LIMIT 1) AS user_avatar
+        FROM friend_requests fr JOIN users u ON u.id = fr.sender_id
+        WHERE fr.receiver_id = ? AND fr.status = 'pending' ORDER BY fr.created_at DESC`, [req.authUserId]);
+      return res.json({ success: true, data: (rows || []).map((row: any) => {
+        let profileData: any = row.profile_data || {};
+        if (typeof profileData === 'string') { try { profileData = JSON.parse(profileData); } catch { profileData = {}; } }
+        profileData.images = row.user_avatar ? [row.user_avatar] : (Array.isArray(profileData.images) ? profileData.images : []);
+        return { request_id: Number(row.id), user_id: Number(row.user_id), profile_data: profileData, created_at: row.created_at };
+      }) });
+    } catch (error: any) {
+      console.error('Could not load friend requests:', error.code || error.message);
+      return res.status(503).json({ success: false, error: 'Could not load incoming friend requests.' });
+    }
+  });
+
+  app.post('/api/friend-requests', async (req, res) => {
+    const senderId = Number(req.authUserId);
+    const receiverId = Number(req.body?.target_user_id);
+    if (!Number.isSafeInteger(receiverId) || receiverId <= 0 || receiverId === senderId) return res.status(400).json({ success: false, error: 'TÃ i khoáº£n nháº­n lá»i má»i khÃ´ng há»£p lá»‡.' });
+    let connection: any;
+    try {
+      connection = await dbPool!.getConnection();
+      await connection.beginTransaction();
+      const [targetRows]: any = await connection.execute('SELECT id FROM users WHERE id = ? LIMIT 1', [receiverId]);
+      if (!targetRows?.length) { await connection.rollback(); return res.status(404).json({ success: false, error: 'KhÃ´ng tÃ¬m tháº¥y tÃ i khoáº£n nÃ y.' }); }
+      const [blockedRows]: any = await connection.execute('SELECT id FROM blocked_users WHERE (user_id = ? AND blocked_user_id = ?) OR (user_id = ? AND blocked_user_id = ?) LIMIT 1', [senderId, receiverId, receiverId, senderId]);
+      if (blockedRows?.length) { await connection.rollback(); return res.status(403).json({ success: false, error: 'KhÃ´ng thá»ƒ gá»­i lá»i má»i cho tÃ i khoáº£n nÃ y.' }); }
+      const user1 = Math.min(senderId, receiverId);
+      const user2 = Math.max(senderId, receiverId);
+      const [matchRows]: any = await connection.execute('SELECT id FROM matches WHERE user1_id = ? AND user2_id = ? LIMIT 1', [user1, user2]);
+      if (matchRows?.length) { await connection.rollback(); return res.json({ success: true, status: 'accepted', match_id: Number(matchRows[0].id) }); }
+      const [inverseRows]: any = await connection.execute("SELECT id FROM friend_requests WHERE sender_id = ? AND receiver_id = ? AND status = 'pending' LIMIT 1 FOR UPDATE", [receiverId, senderId]);
+      if (inverseRows?.length) {
+        await connection.execute("UPDATE friend_requests SET status = 'accepted' WHERE id = ? OR (sender_id = ? AND receiver_id = ?)", [inverseRows[0].id, senderId, receiverId]);
+        await connection.execute('INSERT INTO matches (user1_id, user2_id) VALUES (?, ?)', [user1, user2]);
+        const [newMatch]: any = await connection.execute('SELECT id FROM matches WHERE user1_id = ? AND user2_id = ? ORDER BY id DESC LIMIT 1', [user1, user2]);
+        await connection.commit();
+        return res.json({ success: true, status: 'accepted', match_id: Number(newMatch[0].id) });
+      }
+      await connection.execute("INSERT INTO friend_requests (sender_id, receiver_id, status) VALUES (?, ?, 'pending') ON DUPLICATE KEY UPDATE status = IF(status = 'rejected', 'pending', status), updated_at = CURRENT_TIMESTAMP", [senderId, receiverId]);
+      const [requestRows]: any = await connection.execute('SELECT id, status FROM friend_requests WHERE sender_id = ? AND receiver_id = ? LIMIT 1', [senderId, receiverId]);
+      await connection.commit();
+      return res.json({ success: true, request_id: Number(requestRows[0].id), status: requestRows[0].status });
+    } catch (error: any) {
+      if (connection) await connection.rollback().catch(() => {});
+      console.error('Could not send friend request:', error.code || error.message);
+      return res.status(503).json({ success: false, error: 'Could not send friend request.' });
+    } finally { connection?.release(); }
+  });
+
+  app.post('/api/friend-requests/:requestId/respond', async (req, res) => {
+    const requestId = Number(req.params.requestId);
+    const response = req.body?.response;
+    if (!Number.isSafeInteger(requestId) || requestId <= 0 || !['accept', 'reject'].includes(response)) return res.status(400).json({ success: false, error: 'Pháº£n há»“i lá»i má»i khÃ´ng há»£p lá»‡.' });
+    let connection: any;
+    try {
+      connection = await dbPool!.getConnection();
+      await connection.beginTransaction();
+      const [rows]: any = await connection.execute("SELECT id, sender_id, receiver_id FROM friend_requests WHERE id = ? AND receiver_id = ? AND status = 'pending' FOR UPDATE", [requestId, req.authUserId]);
+      if (!rows?.length) { await connection.rollback(); return res.status(404).json({ success: false, error: 'KhÃ´ng tÃ¬m tháº¥y lá»i má»i Ä‘ang chá».' }); }
+      const senderId = Number(rows[0].sender_id);
+      const receiverId = Number(rows[0].receiver_id);
+      const status = response === 'accept' ? 'accepted' : 'rejected';
+      await connection.execute('UPDATE friend_requests SET status = ? WHERE id = ?', [status, requestId]);
+      let matchId: number | null = null;
+      if (response === 'accept') {
+        const user1 = Math.min(senderId, receiverId);
+        const user2 = Math.max(senderId, receiverId);
+        const [existing]: any = await connection.execute('SELECT id FROM matches WHERE user1_id = ? AND user2_id = ? LIMIT 1', [user1, user2]);
+        if (existing?.length) matchId = Number(existing[0].id);
+        else {
+          const [result]: any = await connection.execute('INSERT INTO matches (user1_id, user2_id) VALUES (?, ?)', [user1, user2]);
+          matchId = Number(result.insertId);
+        }
+      }
+      await connection.commit();
+      return res.json({ success: true, status, match_id: matchId });
+    } catch (error: any) {
+      if (connection) await connection.rollback().catch(() => {});
+      console.error('Could not respond to friend request:', error.code || error.message);
+      return res.status(503).json({ success: false, error: 'Could not update the friend request.' });
+    } finally { connection?.release(); }
+  });
+
+  // Moments are persisted per signed-in user and also exposed to the feed.
+  app.get('/api/moments', async (req, res) => {
+    try {
+      const viewerId = Number(req.authUserId);
+      const [rows]: any = await db.execute(`
+        SELECT m.id, m.user_id, m.image_url, m.caption, m.audience, m.created_at, u.profile_data,
+          (SELECT ui.image_url FROM user_images ui WHERE ui.user_id = m.user_id ORDER BY ui.id LIMIT 1) AS user_avatar,
+          (SELECT COUNT(*) FROM moment_reactions mr WHERE mr.moment_id = m.id AND mr.reaction_type = 'heart') AS heart_count,
+          (SELECT COUNT(*) FROM moment_reactions mr WHERE mr.moment_id = m.id AND mr.reaction_type = 'smile') AS smile_count,
+          (SELECT COUNT(*) FROM moment_reactions mr WHERE mr.moment_id = m.id AND mr.reaction_type = 'surprised') AS surprised_count,
+          (SELECT COUNT(*) FROM moment_reactions mr WHERE mr.moment_id = m.id AND mr.reaction_type = 'sad') AS sad_count,
+          (SELECT mr.reaction_type FROM moment_reactions mr WHERE mr.moment_id = m.id AND mr.user_id = ? ORDER BY mr.id DESC LIMIT 1) AS user_reaction
+        FROM moments m JOIN users u ON u.id = m.user_id
+        WHERE m.user_id = ? OR (
+          m.audience = 'selected' AND EXISTS (
+            SELECT 1 FROM moment_recipients mrp WHERE mrp.moment_id = m.id AND mrp.user_id = ?
+          )
+        ) OR (
+          m.audience IN ('all', 'lover', 'friends') AND EXISTS (
+            SELECT 1 FROM matches mt WHERE (mt.user1_id = m.user_id AND mt.user2_id = ?) OR (mt.user2_id = m.user_id AND mt.user1_id = ?)
+          )
+        )        ORDER BY m.created_at DESC, m.id DESC LIMIT 100`, [viewerId, viewerId, viewerId, viewerId, viewerId]);
+      const data = (rows || []).map((row: any) => {
+        let profileData: any = row.profile_data || {};
+        if (typeof profileData === 'string') { try { profileData = JSON.parse(profileData); } catch { profileData = {}; } }
+        return {
+          id: Number(row.id), userId: Number(row.user_id), userName: profileData.name || 'Người dùng',
+          userAvatar: row.user_avatar || '', imageUrl: row.image_url, caption: row.caption || '',
+          createdAt: row.created_at, audience: row.audience,
+          reactions: { heart: Number(row.heart_count), smile: Number(row.smile_count), surprised: Number(row.surprised_count), sad: Number(row.sad_count) },
+          userReaction: row.user_reaction || undefined,
+        };
+      });
+      return res.json({ success: true, data });
+    } catch (error: any) {
+      console.error('Could not load moments from MySQL:', error.code || error.message);
+      return res.status(503).json({ success: false, error: 'Could not load moments from MySQL.' });
+    }
+  });
+
+  app.get('/api/moments/mine', async (req, res) => {
+    try {
+      const [rows]: any = await db.execute(`SELECT m.id, m.user_id, m.image_url, m.caption, m.audience, m.created_at,
+        (SELECT ui.image_url FROM user_images ui WHERE ui.user_id = m.user_id ORDER BY ui.id LIMIT 1) AS user_avatar,
+        (SELECT COUNT(*) FROM moment_reactions mr WHERE mr.moment_id = m.id AND mr.reaction_type = 'heart') AS heart_count,
+        (SELECT COUNT(*) FROM moment_reactions mr WHERE mr.moment_id = m.id AND mr.reaction_type = 'smile') AS smile_count,
+        (SELECT COUNT(*) FROM moment_reactions mr WHERE mr.moment_id = m.id AND mr.reaction_type = 'surprised') AS surprised_count,
+        (SELECT COUNT(*) FROM moment_reactions mr WHERE mr.moment_id = m.id AND mr.reaction_type = 'sad') AS sad_count
+        FROM moments m WHERE m.user_id = ? ORDER BY m.created_at DESC, m.id DESC LIMIT 100`, [req.authUserId]);
+      return res.json({ success: true, data: (rows || []).map((row: any) => ({
+        id: Number(row.id), userId: Number(row.user_id), userName: 'Bạn', userAvatar: row.user_avatar || '', imageUrl: row.image_url,
+        caption: row.caption || '', createdAt: row.created_at, audience: row.audience,
+        reactions: { heart: Number(row.heart_count), smile: Number(row.smile_count), surprised: Number(row.surprised_count), sad: Number(row.sad_count) },
+      })) });
+    } catch (error: any) {
+      console.error('Could not load own moments:', error.code || error.message);
+      return res.status(503).json({ success: false, error: 'Could not load your moments.' });
+    }
+  });
+
+  app.post('/api/moments', async (req, res) => {
+    const moment = req.body || {};
+    const userId = Number(req.authUserId);
+    if (typeof moment.imageUrl !== 'string' || !moment.imageUrl.trim() || moment.imageUrl.length > 20_000_000 || !/^(https?:\/\/|data:image\/(png|jpeg|webp|gif);base64,)/i.test(moment.imageUrl)) {
+      return res.status(400).json({ success: false, error: 'Khoảnh khắc không hợp lệ.' });
+    }
+    const audience = moment.audience === 'all' ? 'all' : 'selected';
+    const recipientIds = Array.isArray(moment.recipientIds)
+      ? [...new Set(moment.recipientIds.map((id: any) => Number(id)).filter((id: number) => Number.isSafeInteger(id) && id > 0 && id !== userId))]
+      : [];
+    if (audience === 'selected' && (!recipientIds.length || recipientIds.length > 200)) {
+      return res.status(400).json({ success: false, error: 'Hãy chọn từ 1 đến 200 người bạn để gửi khoảnh khắc.' });
+    }
+    let connection: any;
+    try {
+      if (!dbPool) return res.status(503).json({ success: false, error: 'Chưa kết nối được cơ sở dữ liệu.' });
+      connection = await dbPool.getConnection();
+      await connection.beginTransaction();
+      if (audience === 'selected') {
+        const placeholders = recipientIds.map(() => '?').join(',');
+        const friendSql = 'SELECT DISTINCT IF(user1_id = ?, user2_id, user1_id) AS friend_id FROM matches WHERE (user1_id = ? OR user2_id = ?) AND IF(user1_id = ?, user2_id, user1_id) IN (' + placeholders + ')';
+        const [friendRows]: any = await connection.execute(friendSql, [userId, userId, userId, userId, ...recipientIds]);
+        const validFriendIds = new Set((friendRows || []).map((row: any) => Number(row.friend_id)));
+        if (validFriendIds.size !== recipientIds.length) {
+          await connection.rollback();
+          return res.status(400).json({ success: false, error: 'Danh sách có người không phải bạn bè của bạn. Hãy tải lại danh sách rồi thử lại.' });
+        }
+      }
+      const caption = String(moment.caption || '').trim().slice(0, 255);
+      const [insertResult]: any = await connection.execute(
+        'INSERT INTO moments (user_id, image_url, caption, audience) VALUES (?, ?, ?, ?)',
+        [userId, moment.imageUrl, caption || null, audience]
+      );
+      const momentId = Number(insertResult.insertId);
+      if (audience === 'selected') {
+        for (const recipientId of recipientIds) {
+          await connection.execute('INSERT INTO moment_recipients (moment_id, user_id) VALUES (?, ?)', [momentId, recipientId]);
+        }
+      }
+      await connection.commit();
+      return res.status(201).json({
+        success: true,
+        data: {
+          ...moment,
+          id: momentId,
+          userId,
+          caption,
+          audience,
+          recipientIds,
+          reactions: { heart: 0, smile: 0, surprised: 0, sad: 0 },
+          userReaction: undefined,
+        },
+      });
+    } catch (error: any) {
+      if (connection) await connection.rollback().catch(() => {});
+      console.error('Could not save moment to MySQL:', error.code || error.message || error);
+      return res.status(503).json({ success: false, error: 'Không lưu được khoảnh khắc vào cơ sở dữ liệu.' });
+    } finally {
+      connection?.release();
+    }
+  });
+  app.post('/api/moments/:momentId/reactions', async (req, res) => {
+    const momentId = Number(req.params.momentId);
+    const reaction = String(req.body?.reaction || '');
+    if (!Number.isSafeInteger(momentId) || momentId <= 0 || !['heart', 'smile', 'surprised', 'sad'].includes(reaction)) {
+      return res.status(400).json({ success: false, error: 'Invalid moment reaction.' });
+    }
+    let connection: any;
+    try {
+      connection = await dbPool!.getConnection();
+      await connection.beginTransaction();
+      const momentSql = "SELECT m.id FROM moments m WHERE m.id = ? AND (m.user_id = ? OR (m.audience = 'selected' AND EXISTS (SELECT 1 FROM moment_recipients mrp WHERE mrp.moment_id = m.id AND mrp.user_id = ?)) OR (m.audience IN ('all', 'lover', 'friends') AND EXISTS (SELECT 1 FROM matches mt WHERE (mt.user1_id = m.user_id AND mt.user2_id = ?) OR (mt.user2_id = m.user_id AND mt.user1_id = ?)))) LIMIT 1 FOR UPDATE";
+      const [momentRows]: any = await connection.execute(momentSql, [momentId, req.authUserId, req.authUserId, req.authUserId, req.authUserId]);
+      if (!momentRows?.length) {
+        await connection.rollback();
+        return res.status(404).json({ success: false, error: 'Moment not found or access denied.' });
+      }
+      const [previousRows]: any = await connection.execute('SELECT reaction_type FROM moment_reactions WHERE moment_id = ? AND user_id = ? ORDER BY id DESC LIMIT 1', [momentId, req.authUserId]);
+      await connection.execute('DELETE FROM moment_reactions WHERE moment_id = ? AND user_id = ?', [momentId, req.authUserId]);
+      const removed = previousRows?.[0]?.reaction_type === reaction;
+      if (!removed) await connection.execute('INSERT INTO moment_reactions (moment_id, user_id, reaction_type) VALUES (?, ?, ?)', [momentId, req.authUserId, reaction]);
+      await connection.commit();
+      return res.json({ success: true, userReaction: removed ? null : reaction });
+    } catch (error: any) {
+      if (connection) await connection.rollback().catch(() => {});
+      console.error('Could not save moment reaction:', error.code || error.message);
+      return res.status(503).json({ success: false, error: 'Could not save reaction.' });
+    } finally { connection?.release(); }
+  });
+
+  app.get('/api/moments/:momentId/reactions', async (req, res) => {
+    const momentId = Number(req.params.momentId);
+    if (!Number.isSafeInteger(momentId) || momentId <= 0) return res.status(400).json({ success: false, error: 'Invalid moment id.' });
+    try {
+      const [owners]: any = await db.execute('SELECT id FROM moments WHERE id = ? AND user_id = ? LIMIT 1', [momentId, req.authUserId]);
+      if (!owners?.length) return res.status(403).json({ success: false, error: 'You can only view reactions on your own moments.' });
+      const [rows]: any = await db.execute(`SELECT u.id AS user_id, u.profile_data, mr.reaction_type, mr.created_at,
+        (SELECT ui.image_url FROM user_images ui WHERE ui.user_id = u.id ORDER BY ui.id LIMIT 1) AS user_avatar
+        FROM moment_reactions mr JOIN users u ON u.id = mr.user_id WHERE mr.moment_id = ? ORDER BY mr.created_at DESC`, [momentId]);
+      return res.json({ success: true, data: (rows || []).map((row: any) => {
+        let profile: any = row.profile_data || {};
+        if (typeof profile === 'string') { try { profile = JSON.parse(profile); } catch { profile = {}; } }
+        return { userId: Number(row.user_id), userName: profile.name || 'Người dùng', userAvatar: row.user_avatar || '', reaction: row.reaction_type, createdAt: row.created_at };
+      }) });
+    } catch (error: any) {
+      console.error('Could not load moment reactions:', error.code || error.message);
+      return res.status(503).json({ success: false, error: 'Could not load reactions.' });
+    }
+  });
+
   // Fetch historical swipes for a user (needed for profile filtering logic)
+  app.post('/api/users/:targetId/view', async (req, res) => {
+    const userId = Number(req.authUserId);
+    const targetUserId = Number(req.params.targetId);
+    if (!Number.isSafeInteger(targetUserId) || targetUserId <= 0 || targetUserId === userId) {
+      return res.status(400).json({ success: false, error: 'Hồ sơ không hợp lệ.' });
+    }
+    try {
+      await db.execute(
+        'INSERT IGNORE INTO profile_impressions (user_id, target_user_id) VALUES (?, ?)',
+        [userId, targetUserId]
+      );
+      return res.json({ success: true });
+    } catch (err: any) {
+      if (dbPool) return res.status(503).json({ success: false, error: 'Không lưu được lịch sử xem hồ sơ.' });
+      const alreadyRecorded = mockSwipes.some((swipe: any) => Number(swipe.user_id) === userId && Number(swipe.target_user_id) === targetUserId);
+      if (!alreadyRecorded) {
+        mockSwipes.push({ user_id: userId, target_user_id: targetUserId, action: 'viewed' });
+        saveMockDb();
+      }
+      return res.json({ success: true });
+    }
+  });
+
   app.get("/api/users/:userId/swipes", async (req, res) => {
     try {
       const { userId } = req.params;
+      if (!requireOwnUserId(req, res, userId)) return;
       try {
         const [rows]: any = await db.execute(
-          "SELECT target_user_id, action FROM swipes WHERE user_id = ?",
-          [userId]
+          `SELECT target_user_id, action FROM swipes WHERE user_id = ?
+           UNION
+           SELECT target_user_id, 'viewed' AS action FROM profile_impressions WHERE user_id = ?`,
+          [userId, userId]
         );
         const formatted = rows.map((r: any) => ({
            target_user_id: Number(r.target_user_id),
@@ -1038,6 +2323,7 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
         }));
         return res.json({ success: true, data: formatted });
       } catch (err: any) {
+        if (dbPool) return res.status(503).json({ success: false, error: 'Không tải được lịch sử hồ sơ đã xem.' });
         const formatted = mockSwipes
           .filter(s => String(s.user_id) === String(userId))
           .map((s: any) => ({
@@ -1054,34 +2340,124 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
   // Fetch users for Explore View
   app.get("/api/users/explore", async (req, res) => {
     try {
+      const currentUserId = Number(req.authUserId);
+      const includeViewed = req.query.forExplore === '1';
+      const [userRows]: any = includeViewed
+        ? await db.execute('SELECT u.id, u.profile_data, u.created_at, u.is_premium FROM users u WHERE u.id <> ?', [currentUserId])
+        : await db.execute(`SELECT u.id, u.profile_data, u.created_at, u.is_premium FROM users u
+            LEFT JOIN swipes s ON s.user_id = ? AND s.target_user_id = u.id
+            LEFT JOIN profile_impressions i ON i.user_id = ? AND i.target_user_id = u.id
+            WHERE u.id <> ? AND s.id IS NULL AND i.id IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM friend_requests fr
+                WHERE ((fr.sender_id = ? AND fr.receiver_id = u.id) OR (fr.sender_id = u.id AND fr.receiver_id = ?))
+                  AND fr.status IN ('pending', 'accepted')
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM matches mt
+                WHERE (mt.user1_id = ? AND mt.user2_id = u.id) OR (mt.user2_id = ? AND mt.user1_id = u.id)
+              )`, [currentUserId, currentUserId, currentUserId, currentUserId, currentUserId, currentUserId, currentUserId]);
+
+      if (userRows.length === 0) return res.json({ success: true, data: [] });
+
+      const userIds = userRows.map((row: any) => Number(row.id));
+      const placeholders = userIds.map(() => '?').join(',');
+      const [imageRows]: any = await db.execute(
+        `SELECT user_id, image_url FROM user_images WHERE user_id IN (${placeholders}) ORDER BY id ASC`,
+        userIds
+      );
+      const [songRows]: any = await db.execute(
+        `SELECT user_id, song_title FROM user_songs WHERE user_id IN (${placeholders})`,
+        userIds
+      );
+      const [interestRows]: any = await db.execute(
+        `SELECT ui.user_id, i.name FROM user_interests ui JOIN interests i ON i.id = ui.interest_id WHERE ui.user_id IN (${placeholders}) ORDER BY i.name`,
+        userIds
+      );
+      let momentRows: any[] = [];
       try {
-        const [rows]: any = await db.execute("SELECT id, email, profile_data FROM users");
-        const users = [];
-        for (const row of rows) {
-            let profileData = row.profile_data || {};
-            if (typeof profileData === 'string') {
-                try { profileData = JSON.parse(profileData); } catch(e){}
-            }
-            const [imgRows]: any = await db.execute("SELECT image_url FROM user_images WHERE user_id = ?", [row.id]);
-            if (imgRows && imgRows.length > 0) {
-                profileData.images = imgRows.map((r: any) => r.image_url);
-            }
-            
-            const [songRows]: any = await db.execute("SELECT song_title FROM user_songs WHERE user_id = ?", [row.id]);
-            if (songRows && songRows.length > 0) {
-                profileData.songTitle = songRows[0].song_title;
-                // Don't include song_data here to keep the API fast, the frontend will fetch it via the /api/users/:id/song endpoint when playing
-            }
-            
-            row.profile_data = profileData;
-            users.push(row);
-        }
-        return res.json({ success: true, data: users });
-      } catch (err: any) {
-         return res.json({ success: true, data: mockUsers });
+        const [rows]: any = await db.execute(
+          `SELECT DISTINCT user_id FROM moments WHERE user_id IN (${placeholders}) AND created_at >= DATE_SUB(NOW(), INTERVAL 24 HOUR)`,
+          userIds
+        );
+        momentRows = rows || [];
+      } catch {}
+      const usersWithMoments = new Set<number>((momentRows || []).map((row: any) => Number(row.user_id)));
+      const imagesByUser = new Map<number, string[]>();
+      for (const imageRow of imageRows) {
+        const userId = Number(imageRow.user_id);
+        const imageUrl = String(imageRow.image_url || '').trim();
+        if (!imageUrl) continue;
+        const images = imagesByUser.get(userId) || [];
+        if (!images.includes(imageUrl)) images.push(imageUrl);
+        imagesByUser.set(userId, images);
       }
+      const songsByUser = new Map<number, string>();
+      for (const songRow of songRows) {
+        if (songRow.song_title) songsByUser.set(Number(songRow.user_id), songRow.song_title);
+      }
+      const interestsByUser = new Map<number, string[]>();
+      for (const interestRow of interestRows || []) {
+        const userId = Number(interestRow.user_id);
+        const interests = interestsByUser.get(userId) || [];
+        interests.push(String(interestRow.name));
+        interestsByUser.set(userId, interests);
+      }
+
+      const [currentUserRows]: any = await db.execute(
+        'SELECT profile_data FROM users WHERE id = ? LIMIT 1',
+        [currentUserId]
+      );
+      let currentProfile: any = currentUserRows?.[0]?.profile_data || {};
+      if (typeof currentProfile === 'string') {
+        try { currentProfile = JSON.parse(currentProfile); } catch { currentProfile = {}; }
+      }
+      const [currentInterestRows]: any = await db.execute('SELECT i.name FROM user_interests ui JOIN interests i ON i.id = ui.interest_id WHERE ui.user_id = ? ORDER BY i.name', [currentUserId]);
+      currentProfile.interests = [...new Set([
+        ...(Array.isArray(currentProfile.interests) ? currentProfile.interests : []),
+        ...(currentInterestRows || []).map((row: any) => String(row.name)),
+      ])];
+
+      const users = userRows.map((row: any) => {
+        let profileData: any = row.profile_data || {};
+        if (typeof profileData === 'string') {
+          try { profileData = JSON.parse(profileData); } catch { profileData = {}; }
+        }
+        const dbImages = imagesByUser.get(Number(row.id)) || [];
+        const profileImages = Array.isArray(profileData.images) ? profileData.images : [];
+        profileData.images = [...new Set([...dbImages, ...profileImages].map((url: any) => String(url || '').trim()).filter(Boolean))];
+        profileData.interests = interestsByUser.get(Number(row.id)) || (Array.isArray(profileData.interests) ? profileData.interests : []);
+        profileData.hasMoments = usersWithMoments.has(Number(row.id));
+        const distanceKm = calculateDistanceKm(currentProfile, profileData);
+        const songTitle = songsByUser.get(Number(row.id));
+        if (songTitle) profileData.songTitle = songTitle;
+
+        // Return only a rounded distance; never expose another person's exact coordinates.
+        delete profileData.lat;
+        delete profileData.lng;
+        delete profileData.latitude;
+        delete profileData.longitude;
+        return { id: row.id, profile_data: profileData, created_at: row.created_at, distance_km: distanceKm, is_premium: !!row.is_premium };
+      }).filter((user: any) => user.profile_data.images.length > 0);
+
+      return res.json({ success: true, data: users });
     } catch (e) {
-      res.status(500).json({ error: "Lỗi Server" });
+      console.error('Failed to load MySQL explore profiles:', (e as any)?.code || (e as any)?.message || e);
+      if (dbPool) {
+        return res.status(503).json({
+          success: false,
+          error: 'Không đọc được hồ sơ từ MySQL. Kiểm tra kết nối tại /api/health và xác nhận các bảng users, swipes, user_images, user_songs đã tồn tại.'
+        });
+      }
+      const swipedIds = new Set(mockSwipes.filter((swipe: any) => Number(swipe.user_id) === Number(req.authUserId)).map((swipe: any) => Number(swipe.target_user_id)));
+      const publicUsers = mockUsers.filter(user => Number(user.id) !== Number(req.authUserId) && !swipedIds.has(Number(user.id)))
+        .map(user => {
+          const profileData = typeof user.profile_data === 'string'
+            ? (() => { try { return JSON.parse(user.profile_data); } catch { return {}; } })()
+            : (user.profile_data || user.profileData || {});
+          return { id: user.id, profile_data: { ...profileData, hasMoments: Boolean(profileData.hasMoments) }, created_at: user.created_at || null, distance_km: null, is_premium: Boolean(profileData.isPremium) };
+        }).filter(user => Array.isArray(user.profile_data.images) && user.profile_data.images.length > 0);
+      return res.json({ success: true, data: publicUsers });
     }
   });
 
@@ -1089,6 +2465,7 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
   app.post("/api/matches/swipe", async (req, res) => {
     try {
       const { user_id, target_user_id, action } = req.body; 
+      if (!requireOwnUserId(req, res, user_id)) return;
       const swipeAction = normalizeSwipeAction(action);
       if (!user_id || !target_user_id || !swipeAction) {
         return res.status(400).json({ success: false, error: "Thiếu dữ liệu swipe" });
@@ -1096,6 +2473,48 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
 
       // Thả tim = gửi lời kết bạn (pending); khi cả hai đều like => tạo match
       if (swipeAction === 'like') {
+        let alreadyLiked = mockSwipes.some((swipe: any) => Number(swipe.user_id) === Number(user_id) && Number(swipe.target_user_id) === Number(target_user_id) && String(swipe.action).toLowerCase() === 'like');
+        if (dbPool) {
+          try {
+            const [existingLikeRows]: any = await db.execute(
+              "SELECT id FROM swipes WHERE user_id = ? AND target_user_id = ? AND action = 'like' LIMIT 1",
+              [user_id, target_user_id]
+            );
+            alreadyLiked = !!existingLikeRows?.length;
+          } catch (error) {
+            if (process.env.NODE_ENV === 'production') throw error;
+          }
+        }
+        if (!alreadyLiked) {
+          let premium = false;
+          if (dbPool) {
+            try {
+              premium = await hasActivePremium(Number(user_id));
+            } catch (error: any) {
+              if (process.env.NODE_ENV === 'production') {
+                console.error('Could not check like daily limit:', error.code || error.message);
+                return res.status(503).json({ success: false, error: 'Không kiểm tra được lượt thích. Vui lòng thử lại sau.' });
+              }
+            }
+          }
+          if (!premium) {
+            try {
+              const quota = await consumeDailyUsage(Number(user_id), 'like', 50);
+              if (!quota.allowed) {
+                return res.status(429).json({
+                  success: false,
+                  code: 'LIKE_DAILY_LIMIT',
+                  limit: 50,
+                  used: quota.used,
+                  error: 'Bạn đã hết 50 lượt thả tim miễn phí hôm nay. Nâng cấp Premium để tiếp tục thả tim không giới hạn.'
+                });
+              }
+            } catch (error: any) {
+              console.error('Could not record like daily usage:', error.code || error.message);
+              return res.status(503).json({ success: false, error: 'Không ghi nhận được lượt thích. Vui lòng thử lại sau.' });
+            }
+          }
+        }
         try {
           await db.execute(
             "INSERT INTO swipes (user_id, target_user_id, action) VALUES (?, ?, 'like') ON DUPLICATE KEY UPDATE action = VALUES(action)",
@@ -1183,7 +2602,7 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
   });
 
   // Chấp nhận lời kết bạn (tạo match để mở khung chat)
-  app.post("/api/likes/accept", async (req, res) => {
+  app.post("/api/likes/accept", requireOwnBodyField('user_id'), async (req, res) => {
     try {
       const { user_id, requester_id } = req.body; // user_id = người nhận, requester_id = người đã thả tim
       if (!user_id || !requester_id) return res.status(400).json({ success: false, error: "Thiếu dữ liệu" });
@@ -1235,10 +2654,11 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
   app.get("/api/likes/:userId", async (req, res) => {
     try {
       const { userId } = req.params;
+      if (!requireOwnUserId(req, res, userId)) return;
       
       try {
         const [rows]: any = await db.execute(`
-          SELECT u.id as user_id, u.email, u.profile_data
+          SELECT u.id as user_id, u.profile_data
           FROM swipes s
           JOIN users u ON s.user_id = u.id
           WHERE s.target_user_id = ?
@@ -1263,7 +2683,7 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
         // Backward compatible fallback if DB schema is old (likes table)
         try {
           const [rows]: any = await db.execute(
-            "SELECT users.id as user_id, users.email, users.profile_data FROM likes JOIN users ON likes.user_id = users.id WHERE likes.target_user_id = ?",
+            "SELECT users.id as user_id, users.profile_data FROM likes JOIN users ON likes.user_id = users.id WHERE likes.target_user_id = ?",
             [userId]
           );
           let validLikes = [];
@@ -1291,8 +2711,7 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
                 if (u) {
                     data.push({
                        user_id: u.id,
-                       email: u.email,
-                       profile_data: u.profile_data || u.profileData
+                        profile_data: u.profile_data || u.profileData
                     });
                 }
             }
@@ -1308,9 +2727,10 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
   app.get("/api/matches/:userId", async (req, res) => {
     try {
       const { userId } = req.params;
+      if (!requireOwnUserId(req, res, userId)) return;
       try {
         const [rows]: any = await db.execute(
-          `SELECT m.id as match_id, u.id as user_id, u.email, u.profile_data 
+          `SELECT m.id as match_id, u.id as user_id, u.profile_data 
            FROM matches m 
            JOIN users u ON (u.id = m.user1_id OR u.id = m.user2_id) 
            WHERE (m.user1_id = ? OR m.user2_id = ?) AND u.id != ?`, 
@@ -1339,7 +2759,6 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
             return {
                match_id: m.id,
                user_id: u.id,
-               email: u.email,
                profile_data: u.profileData || u.profile_data
             };
         }).filter(Boolean);
@@ -1354,7 +2773,16 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
   app.get("/api/messages/:matchId", async (req, res) => {
     try {
       const { matchId } = req.params;
-      const userId = req.query.user_id as string;
+      const userId = String(req.authUserId);
+      const afterIdValue = req.query.after_id;
+      const afterId = afterIdValue == null || afterIdValue === '' ? null : Number(afterIdValue);
+      const beforeIdValue = req.query.before_id;
+      const beforeId = beforeIdValue == null || beforeIdValue === '' ? null : Number(beforeIdValue);
+      if ((afterId !== null && (!Number.isSafeInteger(afterId) || afterId < 0))
+        || (beforeId !== null && (!Number.isSafeInteger(beforeId) || beforeId <= 0))
+        || (afterId !== null && beforeId !== null)) {
+        return res.status(400).json({ success: false, error: 'Mốc tin nhắn không hợp lệ.' });
+      }
       try {
         if (userId) {
           const [mRows]: any = await db.execute(
@@ -1366,35 +2794,52 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
           }
         }
 
-        // ưu tiên schema chuẩn: messages.text / messages.is_image
+        // Initial load is capped; subsequent polling requests only fetch new rows.
         try {
-          const [rows]: any = await db.execute(
-            "SELECT id, match_id, sender_id, text, is_image, created_at FROM messages WHERE match_id = ? ORDER BY created_at ASC",
-            [matchId]
-          );
-          return res.json({ success: true, data: rows });
+          const sql = afterId == null
+            ? beforeId == null
+              ? "SELECT id, match_id, sender_id, text, is_image, created_at FROM messages WHERE match_id = ? ORDER BY id DESC LIMIT 100"
+              : "SELECT id, match_id, sender_id, text, is_image, created_at FROM messages WHERE match_id = ? AND id < ? ORDER BY id DESC LIMIT 100"
+            : "SELECT id, match_id, sender_id, text, is_image, created_at FROM messages WHERE match_id = ? AND id > ? ORDER BY id ASC LIMIT 100";
+          const cursorId = afterId ?? beforeId;
+          const params = cursorId == null ? [matchId] : [matchId, cursorId];
+          const [rows]: any = await db.execute(sql, params);
+          return res.json({ success: true, data: afterId == null ? rows.reverse() : rows });
         } catch (errText: any) {
           // fallback schema cũ: messages.content
-          const [rows]: any = await db.execute(
-            "SELECT id, match_id, sender_id, content, created_at FROM messages WHERE match_id = ? ORDER BY created_at ASC",
-            [matchId]
-          );
+          const sql = afterId == null
+            ? beforeId == null
+              ? "SELECT id, match_id, sender_id, content, created_at FROM messages WHERE match_id = ? ORDER BY id DESC LIMIT 100"
+              : "SELECT id, match_id, sender_id, content, created_at FROM messages WHERE match_id = ? AND id < ? ORDER BY id DESC LIMIT 100"
+            : "SELECT id, match_id, sender_id, content, created_at FROM messages WHERE match_id = ? AND id > ? ORDER BY id ASC LIMIT 100";
+          const cursorId = afterId ?? beforeId;
+          const params = cursorId == null ? [matchId] : [matchId, cursorId];
+          const [rows]: any = await db.execute(sql, params);
           const mapped = (rows || []).map((r: any) => ({
             ...r,
             text: r.text ?? r.content,
             is_image: typeof r.content === 'string' ? r.content.startsWith('data:image/') : false,
           }));
-          return res.json({ success: true, data: mapped });
+          return res.json({ success: true, data: afterId == null ? mapped.reverse() : mapped });
         }
       } catch (err: any) {
+        if (!mockMatches.some(match => String(match.id) === String(matchId) && (String(match.user1_id) === userId || String(match.user2_id) === userId))) {
+          return res.status(403).json({ success: false, error: 'Bạn không có quyền xem đoạn chat này.' });
+        }
         console.error("DB GET messages failed:", err.message);
-        const data = mockMessages
+        const allMessages = mockMessages
           .filter(m => m.match_id.toString() === matchId.toString())
+          .sort((a: any, b: any) => Number(a.id) - Number(b.id))
           .map((m: any) => ({
             ...m,
             text: m.text ?? m.content,
             is_image: !!m.is_image || (typeof m.content === 'string' && m.content.startsWith('data:image/')),
           }));
+        const data = afterId != null
+          ? allMessages.filter((message: any) => Number(message.id) > afterId).slice(0, 100)
+          : beforeId != null
+            ? allMessages.filter((message: any) => Number(message.id) < beforeId).slice(-100)
+            : allMessages.slice(-100);
         return res.json({ success: true, data });
       }
     } catch (e) {
@@ -1410,6 +2855,12 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
       const text = (req.body.text ?? req.body.content ?? "") as string;
       const isImage = typeof text === 'string' ? text.startsWith('data:image/') : false;
       const actualMatchId = match_id;
+      if (!actualMatchId || !sender_id || !text) {
+        return res.status(400).json({ success: false, error: 'Tin nhắn thiếu dữ liệu.' });
+      }
+      if (String(sender_id) !== String(req.authUserId)) {
+        return res.status(403).json({ success: false, error: 'Bạn không thể gửi tin nhắn thay tài khoản khác.' });
+      }
       try {
         if (!actualMatchId || !sender_id || !text) {
           return res.status(400).json({ success: false, error: "Thiếu dữ liệu tin nhắn" });
@@ -1440,6 +2891,9 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
           return res.json({ success: true, messageId: result.insertId });
         }
       } catch (err: any) {
+        if (!mockMatches.some(match => String(match.id) === String(actualMatchId) && (String(match.user1_id) === String(req.authUserId) || String(match.user2_id) === String(req.authUserId)))) {
+          return res.status(403).json({ success: false, error: 'Bạn không phải thành viên của cuộc trò chuyện này.' });
+        }
         console.error("DB INSERT message failed:", err.message);
         const id = mockMessages.length + 1;
         mockMessages.push({ id, match_id: actualMatchId, sender_id, text, is_image: isImage, created_at: new Date() }); saveMockDb();
@@ -1460,7 +2914,14 @@ Hôm nay cậu thế nào rồi nhen? Có câu chuyện nhỏ ngọt ngào nào 
     app.use(vite.middlewares);
   } else {
     const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
+    app.use(express.static(distPath, {
+      index: false,
+      maxAge: '1y',
+      immutable: true,
+      setHeaders: (res, filePath) => {
+        if (path.basename(filePath) === 'index.html') res.setHeader('Cache-Control', 'no-cache');
+      },
+    }));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });

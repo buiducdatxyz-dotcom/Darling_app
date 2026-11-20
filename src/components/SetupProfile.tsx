@@ -1,8 +1,10 @@
+import { apiFetch } from '../utils/api';
 import React from 'react';
 import { ViewState } from '../types';
 import { genders, jobs, languages, religions, communicationStyles, intents, pets, musics, books, foods, travels, games, sports } from '../data';
-import { Calendar, Image as ImageIcon, ChevronDown, ChevronsUpDown, MapPin, CheckCircle } from 'lucide-react';
+import { Calendar, Image as ImageIcon, ChevronDown, ChevronsUpDown, MapPin, CheckCircle, Sparkles, Shield, Camera, FolderOpen } from 'lucide-react';
 import { AppContext } from './MainApp';
+import { getLunarAnimalFromDob, getWesternZodiacFromDob } from '../utils/compatibility';
 
 interface SetupProps {
   onNavigate: (view: ViewState) => void;
@@ -21,29 +23,8 @@ export function SetupBasic({ onNavigate }: SetupProps) {
   );
   const [error, setError] = React.useState('');
   
-  const getZodiacSign = (dateString: string) => {
-    if (!dateString) return '';
-    const date = new Date(dateString);
-    const day = date.getDate();
-    const month = date.getMonth() + 1; // 1-12
-    if (!day || !month) return '';
-
-    if ((month === 1 && day >= 20) || (month === 2 && day <= 18)) return "Bảo Bình";
-    if ((month === 2 && day >= 19) || (month === 3 && day <= 20)) return "Song Ngư";
-    if ((month === 3 && day >= 21) || (month === 4 && day <= 19)) return "Bạch Dương";
-    if ((month === 4 && day >= 20) || (month === 5 && day <= 20)) return "Kim Ngưu";
-    if ((month === 5 && day >= 21) || (month === 6 && day <= 21)) return "Song Tử";
-    if ((month === 6 && day >= 22) || (month === 7 && day <= 22)) return "Cự Giải";
-    if ((month === 7 && day >= 23) || (month === 8 && day <= 22)) return "Sư Tử";
-    if ((month === 8 && day >= 23) || (month === 9 && day <= 22)) return "Xử Nữ";
-    if ((month === 9 && day >= 23) || (month === 10 && day <= 23)) return "Thiên Bình";
-    if ((month === 10 && day >= 24) || (month === 11 && day <= 21)) return "Bọ Cạp";
-    if ((month === 11 && day >= 22) || (month === 12 && day <= 21)) return "Nhân Mã";
-    if ((month === 12 && day >= 22) || (month === 1 && day <= 19)) return "Ma Kết";
-    return "";
-  };
-
-  const zodiac = getZodiacSign(dob);
+  const zodiac = getWesternZodiacFromDob(dob);
+  const lunarAnimal = getLunarAnimalFromDob(dob);
 
   const handleNext = () => {
     if (!name || !dob || !gender || !height || !images.some(img => img !== '')) {
@@ -51,12 +32,21 @@ export function SetupBasic({ onNavigate }: SetupProps) {
        return;
     }
     setError('');
-    updateSetupData({ name, dob, gender, height, zodiac, images: images.filter(img => img !== '') });
+    updateSetupData({ 
+      name, 
+      dob, 
+      gender, 
+      height, 
+      zodiac, 
+      lunarAnimal: lunarAnimal.fullName,
+      lunarBranch: lunarAnimal.branch,
+      images: images.filter(img => img !== '') 
+    });
     onNavigate('setup_lifestyle');
   };
 
   return (
-    <div className="absolute inset-0 bg-[#ff9ca0] p-6 pt-12 pb-10 text-black font-sans flex flex-col overflow-hidden">
+    <div className="absolute inset-0 bg-[#eaf4ff] p-6 pt-12 pb-10 text-black font-sans flex flex-col overflow-hidden">
       <h1 className="text-[26px] font-bold text-center mb-6 tracking-tight shrink-0">Thông tin cơ bản</h1>
       
       <div className="space-y-4 max-w-[340px] w-full mx-auto flex-1 overflow-y-auto pr-2 pb-6 custom-scrollbar min-h-0">
@@ -80,10 +70,19 @@ export function SetupBasic({ onNavigate }: SetupProps) {
               className="w-full px-3 py-2.5 bg-white bg-opacity-80 rounded-lg border-none focus:outline-none focus:ring-2 focus:ring-black/20 text-[15px] pr-10" 
             />
           </div>
-          {zodiac && (
-            <p className="text-sm mt-2 font-medium bg-white/40 px-3 py-1.5 rounded-lg inline-block border border-black/5">
-              Cung hoàng đạo: <span className="font-bold">{zodiac}</span>
-            </p>
+          {dob && (
+            <div className="flex flex-col gap-2 mt-2.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="text-xs font-semibold bg-white/80 text-sky-950 px-3 py-1.5 rounded-lg border border-black/5 shadow-xs flex items-center gap-1.5">
+                  <span>✨ Cung hoàng đạo:</span>
+                  <span className="font-extrabold text-blue-800">{zodiac}</span>
+                </div>
+                <div className="text-xs font-semibold bg-white/80 text-sky-950 px-3 py-1.5 rounded-lg border border-black/5 shadow-xs flex items-center gap-1.5">
+                  <span>🐾 12 Con giáp:</span>
+                  <span className="font-extrabold text-amber-800">{lunarAnimal.fullName}</span>
+                </div>
+              </div>
+            </div>
           )}
         </div>
         
@@ -216,7 +215,7 @@ export function SetupLifestyle({ onNavigate }: SetupProps) {
   };
 
   return (
-    <div className="absolute inset-0 bg-[#ff9ca0] p-6 pt-12 pb-10 text-black font-sans flex flex-col overflow-hidden">
+    <div className="absolute inset-0 bg-[#eaf4ff] p-6 pt-12 pb-10 text-black font-sans flex flex-col overflow-hidden">
       <h1 className="text-[26px] font-bold text-center mb-6 tracking-tight shrink-0">Phong cách sống</h1>
       
       <div className="max-w-[340px] w-full mx-auto flex-1 overflow-y-auto pr-2 pb-6 custom-scrollbar min-h-0">
@@ -254,7 +253,7 @@ export function SetupLifestyle({ onNavigate }: SetupProps) {
 
 export function WelcomeView({ onNavigate }: SetupProps) {
   return (
-    <div className="absolute inset-0 bg-[#ff9ca0] p-6 pt-12 pb-10 text-black font-sans flex flex-col items-center justify-center overflow-hidden">
+    <div className="absolute inset-0 bg-[#eaf4ff] p-6 pt-12 pb-10 text-black font-sans flex flex-col items-center justify-center overflow-hidden">
       <h1 className="text-[32px] font-bold text-center mb-4 tracking-tight">Chào mừng bạn đến với Darling</h1>
       <p className="text-[16px] text-center mb-10 text-gray-900 leading-relaxed max-w-[300px]">
         Hồ sơ của bạn đã được thiết lập thành công. Hãy bắt đầu khám phá và tìm kiếm những người bạn mới nhé!
@@ -298,7 +297,7 @@ export function SetupInterests({ onNavigate }: SetupProps) {
   };
 
   return (
-    <div className="absolute inset-0 bg-[#ff9ca0] p-6 pt-12 pb-10 text-black font-sans flex flex-col overflow-hidden">
+    <div className="absolute inset-0 bg-[#eaf4ff] p-6 pt-12 pb-10 text-black font-sans flex flex-col overflow-hidden">
       <h1 className="text-[26px] font-bold text-center mb-6 tracking-tight shrink-0">Sở thích của bạn</h1>
       
       <div className="max-w-[340px] w-full mx-auto flex-1 overflow-y-auto pr-2 pb-6 custom-scrollbar min-h-0">
@@ -343,50 +342,79 @@ export function SetupLocation({ onNavigate }: SetupProps) {
   const { setupData, updateSetupData, updateMyProfile, updateSettings } = React.useContext(AppContext);
   const [error, setError] = React.useState('');
   const [isSubmitting, setIsSubmitting] = React.useState(false);
-  const [locationStatus, setLocationStatus] = React.useState<'idle' | 'loading' | 'success'>('idle');
 
-  const handleAllowLocation = () => {
-    setLocationStatus('loading');
+  // Permission toggles
+  const [allowCamera, setAllowCamera] = React.useState(true);
+  const [allowLocation, setAllowLocation] = React.useState(true);
+  const [allowStorage, setAllowStorage] = React.useState(true);
+
+  const requestPermissionsAndSave = async (skipPrompts = false) => {
+    setIsSubmitting(true);
     setError('');
-    
-    if (!navigator.geolocation) {
-       setError('Trình duyệt của bạn không hỗ trợ định vị.');
-       setLocationStatus('idle');
-       return;
+
+    let determinedLocation = setupData.location || 'Hà Nội, Hà Nội';
+
+    if (!skipPrompts) {
+      // 1. Camera permission request
+      if (allowCamera && navigator.mediaDevices?.getUserMedia) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          stream.getTracks().forEach(t => t.stop());
+          localStorage.setItem('camera_permission_granted', 'true');
+        } catch (e) {
+          console.warn("Camera grant prompt result:", e);
+          localStorage.setItem('camera_permission_granted', 'false');
+        }
+      } else {
+        localStorage.setItem('camera_permission_granted', String(allowCamera));
+      }
+
+      // 2. Storage permission save
+      localStorage.setItem('storage_permission_granted', String(allowStorage));
+
+      // 3. Location permission request
+      if (allowLocation && navigator.geolocation) {
+        try {
+          await new Promise<void>((resolve) => {
+            navigator.geolocation.getCurrentPosition(
+              async (pos) => {
+                const { latitude, longitude } = pos.coords;
+                localStorage.setItem('location_permission_granted', 'true');
+                try {
+                  const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}`);
+                  const data = await res.json();
+                  const city = data.address?.city || data.address?.town || data.address?.county || data.address?.state || 'Gần bạn';
+                  determinedLocation = city;
+                  updateSetupData({ location: city });
+                } catch {
+                  determinedLocation = 'Gần bạn';
+                }
+                resolve();
+              },
+              (err) => {
+                console.warn("Location prompt error:", err);
+                localStorage.setItem('location_permission_granted', 'false');
+                resolve();
+              },
+              { timeout: 4000 }
+            );
+          });
+        } catch (e) {}
+      } else {
+        localStorage.setItem('location_permission_granted', String(allowLocation));
+      }
+    } else {
+      localStorage.setItem('camera_permission_granted', 'false');
+      localStorage.setItem('location_permission_granted', 'false');
+      localStorage.setItem('storage_permission_granted', 'true');
     }
 
-    navigator.geolocation.getCurrentPosition(
-       async (position) => {
-         const { latitude, longitude } = position.coords;
-         try {
-             // Use reverse geocoding
-             const res = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${latitude}&lon=${longitude}`);
-             const data = await res.json();
-             const city = data.address?.city || data.address?.town || data.address?.county || data.address?.state || 'Gần bạn';
-             updateSetupData({ location: city });
-             setLocationStatus('success');
-         } catch {
-             updateSetupData({ location: 'Gần bạn' });
-             setLocationStatus('success');
-         }
-       },
-       (err) => {
-         console.error(err);
-         setError('Không thể lấy vị trí. Vui lòng kiểm tra quyền cài đặt.');
-         setLocationStatus('idle');
-       }
-    );
-  };
-
-  const handleFinish = async () => {
-    setIsSubmitting(true);
-    
     const email = sessionStorage.getItem('temp_register_email');
     const password = sessionStorage.getItem('temp_register_password');
     
     try {
       // 1. Create account
-      const regRes = await fetch('/api/auth/register', {
+      const regRes = await apiFetch('/api/auth/register', {
          method: 'POST',
          headers: { 'Content-Type': 'application/json' },
          body: JSON.stringify({ email, password })
@@ -399,24 +427,36 @@ export function SetupLocation({ onNavigate }: SetupProps) {
          return;
       }
 
+      const newUserId = regData?.user?.id ?? regData?.userId;
+      if (!newUserId || !regData?.token) {
+        setError('Không thể tạo phiên đăng nhập an toàn. Vui lòng thử lại.');
+        setIsSubmitting(false);
+        return;
+      }
+      sessionStorage.setItem('auth_token', regData.token);
+      localStorage.setItem('auth_token', regData.token);
+      sessionStorage.setItem('user_id', String(newUserId));
+      localStorage.setItem('user_id', String(newUserId));
+
       // 2. Save profile
-      await fetch('/api/users/profile', {
+      const profileRes = await apiFetch('/api/users/profile', {
          method: 'POST',
          headers: { 'Content-Type': 'application/json' },
-         body: JSON.stringify({ email, profileData: { ...setupData, need: setupData.intent } })
+         body: JSON.stringify({ email, profileData: { ...setupData, location: determinedLocation, need: setupData.intent } })
       });
-
-      if (regData.success) {
-         sessionStorage.setItem('user_id', regData.userId.toString());
-         localStorage.setItem('user_id', regData.userId.toString());
+      if (!profileRes.ok) {
+        const profileError = await profileRes.json().catch(() => ({}));
+        throw new Error(profileError.error || 'Không lưu được hồ sơ. Vui lòng thử lại.');
       }
 
       // Set global profile in context
       updateMyProfile({
-          id: regData.userId || 999,
+          id: newUserId,
           name: setupData.name,
           dob: setupData.dob,
           zodiac: setupData.zodiac,
+          lunarAnimal: setupData.lunarAnimal,
+          lunarBranch: setupData.lunarBranch,
           gender: setupData.gender,
           height: setupData.height,
           images: setupData.images || [],
@@ -433,12 +473,12 @@ export function SetupLocation({ onNavigate }: SetupProps) {
           travel: setupData.travel,
           game: setupData.game,
           sport: setupData.sport,
-          location: setupData.location,
+          location: determinedLocation,
       } as any);
 
       updateSettings({
           interestedIn: setupData.gender === 'Nam' ? 'Nữ' : 'Nam',
-          location: setupData.location || 'Hà Nội, Hà Nội'
+          location: determinedLocation
       });
 
       sessionStorage.removeItem('temp_register_password');
@@ -453,38 +493,95 @@ export function SetupLocation({ onNavigate }: SetupProps) {
   };
 
   return (
-    <div className="absolute inset-0 bg-[#ff9ca0] p-6 pt-12 pb-10 text-white font-sans flex flex-col items-center justify-center overflow-hidden">
-       <div className="bg-white rounded-3xl p-8 max-w-[340px] w-full text-center shadow-xl text-black flex flex-col items-center">
-          <div className="w-20 h-20 bg-[#ffeff1] rounded-full flex items-center justify-center mb-6">
-             <MapPin className="w-10 h-10 text-[#ff2d55]" />
+    <div className="absolute inset-0 bg-[#eaf4ff] p-5 pt-10 pb-8 text-black font-sans flex flex-col items-center justify-center overflow-y-auto">
+       <div className="bg-white rounded-3xl p-6 max-w-[360px] w-full shadow-2xl text-black flex flex-col items-center">
+          <div className="w-16 h-16 bg-sky-50 rounded-2xl flex items-center justify-center mb-3 border border-sky-100 shadow-sm">
+             <Shield className="w-8 h-8 text-[#0284c7]" />
           </div>
-          <h2 className="text-[22px] font-bold mb-3">Bật vị trí</h2>
-          <p className="text-[15px] text-gray-600 mb-8 font-medium">
-             Cho phép Darling truy cập vào thông tin vị trí thiết bị của bạn để tìm những hồ sơ ấn tượng ở khu vực lân cận.
+          <h2 className="text-[20px] font-extrabold mb-1 tracking-tight text-center">Quyền truy cập ứng dụng</h2>
+          <p className="text-[13px] text-gray-500 mb-5 text-center leading-relaxed">
+             Cho phép truy cập các tính năng thiết bị để có trải nghiệm kết nối trọn vẹn nhất. Bạn có thể thay đổi lại trong Cài đặt bất cứ lúc nào.
           </p>
-          
-          {error && <p className="text-red-500 text-sm font-medium mb-4">{error}</p>}
-          
-          {locationStatus === 'success' ? (
-             <div className="text-green-600 font-bold mb-6 flex items-center gap-2">
-                <CheckCircle className="w-5 h-5" /> Đã xác định vị trí
+
+          {error && <p className="text-red-500 text-xs font-bold mb-3 text-center">{error}</p>}
+
+          {/* 3 Permission Toggles */}
+          <div className="w-full space-y-2.5 mb-6">
+             {/* 1. Camera */}
+             <div className="flex items-center justify-between p-3 rounded-xl bg-gray-50 border border-black/5">
+                <div className="flex items-center gap-2.5 pr-2">
+                   <div className="w-8 h-8 rounded-lg bg-sky-100/80 flex items-center justify-center shrink-0">
+                      <Camera className="w-4 h-4 text-[#0284c7]" />
+                   </div>
+                   <div>
+                      <p className="text-[13px] font-bold text-gray-900 leading-snug">Máy ảnh (Camera)</p>
+                      <p className="text-[11px] text-gray-500">Chụp ảnh khoảnh khắc & đại diện</p>
+                   </div>
+                </div>
+                <button 
+                  type="button"
+                  onClick={() => setAllowCamera(!allowCamera)}
+                  className={`w-11 h-6 rounded-full transition-colors relative p-0.5 shrink-0 ${allowCamera ? 'bg-[#0284c7]' : 'bg-gray-300'}`}
+                >
+                  <div className={`w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${allowCamera ? 'translate-x-5' : 'translate-x-0'}`} />
+                </button>
              </div>
-          ) : (
-             <button 
-                onClick={handleAllowLocation}
-                disabled={locationStatus === 'loading'}
-                className="w-full py-3.5 mb-3 rounded-xl font-bold text-white bg-[#0a84ff] active:bg-[#0070e0] transition-colors shadow-sm text-[15px]"
-             >
-                {locationStatus === 'loading' ? 'Đang tải...' : 'Cho phép'}
-             </button>
-          )}
+
+             {/* 2. Location */}
+             <div className="flex items-center justify-between p-3 rounded-xl bg-gray-50 border border-black/5">
+                <div className="flex items-center gap-2.5 pr-2">
+                   <div className="w-8 h-8 rounded-lg bg-rose-100/80 flex items-center justify-center shrink-0">
+                      <MapPin className="w-4 h-4 text-rose-500" />
+                   </div>
+                   <div>
+                      <p className="text-[13px] font-bold text-gray-900 leading-snug">Vị trí (Location)</p>
+                      <p className="text-[11px] text-gray-500">Tìm kiếm người dùng xung quanh</p>
+                   </div>
+                </div>
+                <button 
+                  type="button"
+                  onClick={() => setAllowLocation(!allowLocation)}
+                  className={`w-11 h-6 rounded-full transition-colors relative p-0.5 shrink-0 ${allowLocation ? 'bg-[#0284c7]' : 'bg-gray-300'}`}
+                >
+                  <div className={`w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${allowLocation ? 'translate-x-5' : 'translate-x-0'}`} />
+                </button>
+             </div>
+
+             {/* 3. Storage */}
+             <div className="flex items-center justify-between p-3 rounded-xl bg-gray-50 border border-black/5">
+                <div className="flex items-center gap-2.5 pr-2">
+                   <div className="w-8 h-8 rounded-lg bg-amber-100/80 flex items-center justify-center shrink-0">
+                      <FolderOpen className="w-4 h-4 text-amber-600" />
+                   </div>
+                   <div>
+                      <p className="text-[13px] font-bold text-gray-900 leading-snug">Thư mục & Tệp tin</p>
+                      <p className="text-[11px] text-gray-500">Tải ảnh từ thư viện thiết bị</p>
+                   </div>
+                </div>
+                <button 
+                  type="button"
+                  onClick={() => setAllowStorage(!allowStorage)}
+                  className={`w-11 h-6 rounded-full transition-colors relative p-0.5 shrink-0 ${allowStorage ? 'bg-[#0284c7]' : 'bg-gray-300'}`}
+                >
+                  <div className={`w-5 h-5 rounded-full bg-white shadow-sm transition-transform ${allowStorage ? 'translate-x-5' : 'translate-x-0'}`} />
+                </button>
+             </div>
+          </div>
 
           <button 
-             onClick={handleFinish}
+             onClick={() => requestPermissionsAndSave(false)}
              disabled={isSubmitting}
-             className="w-full py-3.5 mt-2 rounded-xl font-bold text-black border-2 border-black/10 active:bg-gray-100 transition-colors text-[15px]"
+             className="w-full py-3.5 mb-2 rounded-xl font-bold text-white bg-[#ff2d55] hover:bg-[#e0244b] active:scale-[0.98] transition-all shadow-md text-[15px] flex items-center justify-center gap-2"
           >
-             {isSubmitting ? 'Đang lưu...' : (locationStatus === 'success' ? 'Tiếp tục' : 'Để sau')}
+             {isSubmitting ? 'Đang xử lý...' : 'Cho phép & Tiếp tục'}
+          </button>
+
+          <button 
+             onClick={() => requestPermissionsAndSave(true)}
+             disabled={isSubmitting}
+             className="w-full py-2.5 text-xs font-bold text-gray-500 hover:text-gray-800 transition-colors"
+          >
+             Để sau (Bỏ qua)
           </button>
        </div>
     </div>

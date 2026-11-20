@@ -55,17 +55,17 @@ export const books = [
 ];
 
 export const foods = [
-  'Đồ ăn cay', 'Không thích trà sữa', 'Ăn chay', 'Đồ nướng', 'Cà phê', 'Bún bò Huế', 'Phở', 'Khác'
+  'Đồ ăn cay', 'Nem chua', 'Ăn chay', 'Đồ nướng', 'Cà phê', 'Bún bò Huế', 'Phở', 'Bánh mì', 'Bánh xèo', 'Khác'
 ];
 
 export const travels = [
-  'Rừng rậm', 'Đã từng du lịch nước ngoài', 'Bãi biển', 'Thành phố', 'Núi lửa', 'Đà Lạt', 'SaPa', 'Hội An', 'Khác'
+  'Rừng rậm', 'Đã từng du lịch nước ngoài', 'Bãi biển', 'Thành phố', 'Núi lửa', 'Đà Lạt', 'SaPa', 'Hội An', 'TP. HCM', 'Hà Nội', 'Khác'
 ];
 
 export const games = [
-  'Phòng chat', 'Genshin Impact', 'FiFa', 'Liên quân', 'Free Fire', 'Minecraft', 'Board games', 'Khác'
+  'Phòng chat', 'Genshin Impact', 'FiFa', 'Liên quân', 'Free Fire', 'Minecraft', 'Board games', 'Liên Minh Huyền Thoại', 'Khác'
 ];
 
 export const sports = [
-  'Đua xe công thức 1', 'Thể thao mạo hiểm', 'Tennis', 'Pickleball', 'Bóng đá', 'Gym', 'Khác'
+  'Đua xe công thức 1', 'Thể thao mạo hiểm', 'Tennis', 'Pickleball', 'Bóng đá', 'Gym', 'Bơi lội', 'Bóng rổ', 'Khác'
 ];
