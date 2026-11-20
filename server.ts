@@ -7,7 +7,7 @@ import jwt from "jsonwebtoken";
 import cors from "cors";
 import dotenv from "dotenv";
 import { GoogleGenAI } from "@google/genai";
-import { randomBytes } from "crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual, randomUUID } from "crypto";
 
 declare global {
   namespace Express {
@@ -68,6 +68,132 @@ const db = dbPool || {
       throw new Error("Database not configured");
   }
 };
+
+type S3MediaConfig = { accessKeyId: string; secretAccessKey: string; bucket: string; endpoint: URL; region: string };
+const s3MediaConfig: S3MediaConfig | null = (() => {
+  const accessKeyId = process.env.S3_ACCESS_KEY_ID || process.env.ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID || '';
+  const secretAccessKey = process.env.S3_SECRET_ACCESS_KEY || process.env.SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY || '';
+  const bucket = process.env.S3_BUCKET || process.env.BUCKET || '';
+  const endpointValue = process.env.S3_ENDPOINT || process.env.ENDPOINT || process.env.AWS_ENDPOINT_URL_S3 || '';
+  const region = process.env.S3_REGION || process.env.REGION || process.env.AWS_REGION || 'auto';
+  if (!accessKeyId || !secretAccessKey || !bucket || !endpointValue) return null;
+  try {
+    const endpoint = new URL(endpointValue);
+    if (endpoint.protocol !== 'https:' && endpoint.protocol !== 'http:') return null;
+    return { accessKeyId, secretAccessKey, bucket, endpoint, region };
+  } catch {
+    return null;
+  }
+})();
+
+const sha256Hex = (value: Buffer | string) => createHash('sha256').update(value).digest('hex');
+const hmac = (key: Buffer | string, value: string) => createHmac('sha256', key).update(value).digest();
+const rfc3986 = (value: string) => encodeURIComponent(value).replace(/[!'()*]/g, character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+const mediaExtensions: Record<string, string> = {
+  'image/jpeg': 'jpg', 'image/jpg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/gif': 'gif',
+  'audio/wav': 'wav', 'audio/mpeg': 'mp3', 'audio/mp3': 'mp3',
+};
+
+function getS3ObjectUrl(key: string): { url: URL; host: string } {
+  if (!s3MediaConfig) throw new Error('Object storage is not configured.');
+  const { endpoint, bucket } = s3MediaConfig;
+  const url = new URL(endpoint.toString());
+  if (!url.hostname.toLowerCase().startsWith(`${bucket.toLowerCase()}.`)) {
+    url.hostname = `${bucket}.${url.hostname}`;
+  }
+  const prefix = url.pathname.replace(/\/$/, '');
+  url.pathname = `${prefix}/${key.split('/').map(rfc3986).join('/')}`;
+  return { url, host: url.host };
+}
+
+function getS3SigningKey(dateStamp: string): Buffer {
+  if (!s3MediaConfig) throw new Error('Object storage is not configured.');
+  const dateKey = hmac(`AWS4${s3MediaConfig.secretAccessKey}`, dateStamp);
+  const regionKey = hmac(dateKey, s3MediaConfig.region);
+  const serviceKey = hmac(regionKey, 's3');
+  return hmac(serviceKey, 'aws4_request');
+}
+
+async function putS3Media(key: string, body: Buffer, contentType: string): Promise<void> {
+  if (!s3MediaConfig) throw new Error('Object storage is not configured.');
+  const { url, host } = getS3ObjectUrl(key);
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
+  const dateStamp = amzDate.slice(0, 8);
+  const payloadHash = sha256Hex(body);
+  const canonicalHeaders = `host:${host}\nx-amz-content-sha256:${payloadHash}\nx-amz-date:${amzDate}\n`;
+  const signedHeaders = 'host;x-amz-content-sha256;x-amz-date';
+  const canonicalRequest = `PUT\n${url.pathname}\n\n${canonicalHeaders}\n${signedHeaders}\n${payloadHash}`;
+  const scope = `${dateStamp}/${s3MediaConfig.region}/s3/aws4_request`;
+  const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${sha256Hex(canonicalRequest)}`;
+  const signature = createHmac('sha256', getS3SigningKey(dateStamp)).update(stringToSign).digest('hex');
+  const authorization = `AWS4-HMAC-SHA256 Credential=${s3MediaConfig.accessKeyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
+  const response = await fetch(url, {
+    method: 'PUT',
+    headers: {
+      authorization,
+      'content-type': contentType,
+      'x-amz-content-sha256': payloadHash,
+      'x-amz-date': amzDate,
+    },
+    body: new Uint8Array(body),
+  });
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => {});
+    throw new Error(`Object storage upload failed with HTTP ${response.status}.`);
+  }
+}
+
+function signS3GetUrl(key: string, expiresInSeconds = 24 * 60 * 60): string {
+  if (!s3MediaConfig) throw new Error('Object storage is not configured.');
+  const { url, host } = getS3ObjectUrl(key);
+  const now = new Date();
+  const amzDate = now.toISOString().replace(/[:-]|\.\d{3}/g, '');
+  const dateStamp = amzDate.slice(0, 8);
+  const scope = `${dateStamp}/${s3MediaConfig.region}/s3/aws4_request`;
+  const params: Array<[string, string]> = [
+    ['X-Amz-Algorithm', 'AWS4-HMAC-SHA256'],
+    ['X-Amz-Credential', `${s3MediaConfig.accessKeyId}/${scope}`],
+    ['X-Amz-Date', amzDate],
+    ['X-Amz-Expires', String(Math.min(604800, Math.max(60, expiresInSeconds)))],
+    ['X-Amz-SignedHeaders', 'host'],
+  ];
+  const canonicalQuery = params
+    .map(([name, value]) => `${rfc3986(name)}=${rfc3986(value)}`)
+    .sort()
+    .join('&');
+  const canonicalRequest = `GET\n${url.pathname}\n${canonicalQuery}\nhost:${host}\n\nhost\nUNSIGNED-PAYLOAD`;
+  const stringToSign = `AWS4-HMAC-SHA256\n${amzDate}\n${scope}\n${sha256Hex(canonicalRequest)}`;
+  const signature = createHmac('sha256', getS3SigningKey(dateStamp)).update(stringToSign).digest('hex');
+  url.search = `${canonicalQuery}&X-Amz-Signature=${signature}`;
+  return url.toString();
+}
+
+function getS3MediaKey(value: string): string | null {
+  if (!value.startsWith('s3://')) return null;
+  const key = value.slice('s3://'.length);
+  const allowedPrefixes = ['profile-images/', 'songs/', 'moments/', 'advertisements/', 'media/import/'];
+  if (!allowedPrefixes.some(prefix => key.startsWith(prefix)) || key.includes('..') || key.includes('\\')) return null;
+  return key;
+}
+
+async function resolveMediaUrl(value: string | null | undefined): Promise<string> {
+  const normalized = String(value || '');
+  const key = getS3MediaKey(normalized);
+  return key ? signS3GetUrl(key) : normalized;
+}
+
+async function storeMediaDataUrl(dataUrl: string, namespace: string): Promise<string> {
+  if (!s3MediaConfig || !/^data:/i.test(dataUrl)) return dataUrl;
+  const match = /^data:(image\/(?:jpeg|png|webp|gif)|audio\/wav);base64,([A-Za-z0-9+/=\r\n]+)$/i.exec(dataUrl);
+  if (!match) throw new Error('Unsupported media data URL.');
+  const contentType = match[1].toLowerCase();
+  const body = Buffer.from(match[2].replace(/\s/g, ''), 'base64');
+  if (!body.length) throw new Error('The media payload is empty.');
+  const key = `${namespace}/${randomUUID()}.${mediaExtensions[contentType] || 'bin'}`;
+  await putS3Media(key, body, contentType);
+  return `s3://${key}`;
+}
 
 // Mock database for when DB is not configured (to keep app working in preview)
 import fs from 'fs';
@@ -670,7 +796,66 @@ async function startServer() {
   app.use('/api/auth/register', createRateLimiter(60 * 60 * 1000, 5, 'Quá nhiều yêu cầu đăng ký. Hãy thử lại sau một giờ.'));
   app.use('/api/chat/cupid', createRateLimiter(60 * 1000, 20, 'Bạn gửi yêu cầu quá nhanh. Vui lòng thử lại sau một phút.'));
   app.use('/api/chat/darling', createRateLimiter(60 * 1000, 20, 'Bạn gửi yêu cầu quá nhanh. Vui lòng thử lại sau một phút.'));
+
+  // Temporary, token-protected raw upload route used by the one-time SQL media migrator.
+  // It is registered before the regular API authentication middleware and is inert when the token is unset.
+  app.post('/api/internal/media-import', express.raw({ type: 'application/octet-stream', limit: '8mb' }), async (req, res) => {
+    const expectedToken = process.env.MEDIA_IMPORT_TOKEN || '';
+    const suppliedToken = String(req.get('x-media-import-token') || '');
+    const tokenMatches = expectedToken.length > 0
+      && Buffer.byteLength(expectedToken) === Buffer.byteLength(suppliedToken)
+      && timingSafeEqual(Buffer.from(expectedToken), Buffer.from(suppliedToken));
+    if (!tokenMatches) return res.sendStatus(404);
+    if (!s3MediaConfig) return res.status(503).json({ success: false, error: 'Object storage is not configured.' });
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0 || req.body.length > 8 * 1024 * 1024) {
+      return res.status(400).json({ success: false, error: 'Invalid media payload.' });
+    }
+    const contentType = String(req.get('x-media-content-type') || '').toLowerCase();
+    const extension = mediaExtensions[contentType];
+    if (!extension) return res.status(415).json({ success: false, error: 'Unsupported media type.' });
+    try {
+      const key = `media/import/${randomUUID()}.${extension}`;
+      await putS3Media(key, req.body, contentType);
+      return res.json({ success: true, mediaRef: `s3://${key}` });
+    } catch (error: any) {
+      console.error('Could not import media into object storage:', error.message || error);
+      return res.status(502).json({ success: false, error: 'Could not store the media file.' });
+    }
+  });
+
   app.use('/api', authenticateApiRequest);
+  app.use('/api', (req, res, next) => {
+    const sendJson = res.json.bind(res);
+    const containsMediaRef = (value: any): boolean => {
+      if (typeof value === 'string') return getS3MediaKey(value) !== null;
+      if (Array.isArray(value)) return value.some(containsMediaRef);
+      if (value && typeof value === 'object') return Object.values(value).some(containsMediaRef);
+      return false;
+    };
+    const resolveMediaRefs = async (value: any): Promise<any> => {
+      if (typeof value === 'string') return resolveMediaUrl(value);
+      if (Array.isArray(value)) return Promise.all(value.map(resolveMediaRefs));
+      if (value && typeof value === 'object') {
+        const entries = await Promise.all(Object.entries(value).map(async ([key, child]) => [key, await resolveMediaRefs(child)] as const));
+        return Object.fromEntries(entries);
+      }
+      return value;
+    };
+    res.json = ((body: any) => {
+      if (!containsMediaRef(body)) return sendJson(body);
+      void resolveMediaRefs(body)
+        .then((resolved) => sendJson(resolved))
+        .catch((error: any) => {
+          console.error('Could not sign object storage URL:', error.message || error);
+          if (!res.headersSent) {
+            res.status(503);
+            sendJson({ success: false, error: 'Không tải được ảnh hoặc nhạc lúc này.' });
+          }
+        });
+      return res;
+    }) as typeof res.json;
+    next();
+  });
 
   app.get('/api/health', async (_req, res) => {
     if (!dbPool) {
@@ -794,7 +979,8 @@ async function startServer() {
     const ad = validateAdvertisement(req.body);
     if (!ad) return res.status(400).json({ success: false, error: 'Kiá»ƒm tra tiÃªu Ä‘á», hÃ¬nh áº£nh vÃ  Ä‘Æ°á»ng dáº«n HTTP/HTTPS.' });
     try {
-      const [result]: any = await db.execute('INSERT INTO advertisements (title, description, image_url, target_url, is_active, priority, starts_at, ends_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [ad.title, ad.description, ad.imageUrl, ad.targetUrl, ad.isActive, ad.priority, ad.startsAt, ad.endsAt]);
+      const storedImageUrl = await storeMediaDataUrl(ad.imageUrl, 'advertisements');
+      const [result]: any = await db.execute('INSERT INTO advertisements (title, description, image_url, target_url, is_active, priority, starts_at, ends_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)', [ad.title, ad.description, storedImageUrl, ad.targetUrl, ad.isActive, ad.priority, ad.startsAt, ad.endsAt]);
       return res.status(201).json({ success: true, id: result.insertId });
     } catch (error: any) {
       console.error('Could not create advertisement:', error.code || error.message);
@@ -807,7 +993,8 @@ async function startServer() {
     const id = Number(req.params.id);
     if (!Number.isSafeInteger(id) || id <= 0 || !ad) return res.status(400).json({ success: false, error: 'ThÃ´ng tin quáº£ng cÃ¡o khÃ´ng há»£p lá»‡.' });
     try {
-      const [result]: any = await db.execute('UPDATE advertisements SET title = ?, description = ?, image_url = ?, target_url = ?, is_active = ?, priority = ?, starts_at = ?, ends_at = ? WHERE id = ?', [ad.title, ad.description, ad.imageUrl, ad.targetUrl, ad.isActive, ad.priority, ad.startsAt, ad.endsAt, id]);
+      const storedImageUrl = await storeMediaDataUrl(ad.imageUrl, 'advertisements');
+      const [result]: any = await db.execute('UPDATE advertisements SET title = ?, description = ?, image_url = ?, target_url = ?, is_active = ?, priority = ?, starts_at = ?, ends_at = ? WHERE id = ?', [ad.title, ad.description, storedImageUrl, ad.targetUrl, ad.isActive, ad.priority, ad.startsAt, ad.endsAt, id]);
       if (!result.affectedRows) return res.status(404).json({ success: false, error: 'KhÃ´ng tÃ¬m tháº¥y quáº£ng cÃ¡o.' });
       return res.json({ success: true });
     } catch (error: any) {
@@ -903,19 +1090,24 @@ async function startServer() {
     try {
        const userId = req.params.userId;
        if (!requireOwnUserId(req, res, userId)) return;
-       const { profileData } = req.body;
-       if (!profileData || typeof profileData !== 'object') return res.status(400).json({ error: 'Dữ liệu hồ sơ không hợp lệ.' });
-       const profileJson = JSON.stringify(profileData);
+        const { profileData } = req.body;
+        if (!profileData || typeof profileData !== 'object') return res.status(400).json({ error: 'Dữ liệu hồ sơ không hợp lệ.' });
+        const storedProfileData = { ...profileData };
+        const storedImages = Array.isArray(profileData.images)
+          ? await Promise.all(profileData.images.filter((image: any) => typeof image === 'string' && image).map((image: string) => storeMediaDataUrl(image, 'profile-images')))
+          : null;
+        delete storedProfileData.images;
+        const profileJson = JSON.stringify(storedProfileData);
        try {
            await db.execute(
                "UPDATE users SET profile_data = ? WHERE id = ?",
                [profileJson, userId]
            );
            
-           if (profileData.images && Array.isArray(profileData.images)) {
+            if (storedImages) {
                try {
                    await db.execute("DELETE FROM user_images WHERE user_id = ?", [userId]);
-                   for (const img of profileData.images) {
+                    for (const img of storedImages) {
                        if (img) {
                            await db.execute("INSERT INTO user_images (user_id, image_url) VALUES (?, ?)", [userId, img]);
                        }
@@ -1152,15 +1344,20 @@ async function startServer() {
   // Setup profile / complete registration
   app.post("/api/users/profile", async (req, res) => {
     try {
-       const { profileData } = req.body;
-       const userId = Number(req.authUserId);
-       if (!profileData || typeof profileData !== 'object') return res.status(400).json({ error: 'Dữ liệu hồ sơ không hợp lệ.' });
-       const profileJson = JSON.stringify(profileData);
+        const { profileData } = req.body;
+        const userId = Number(req.authUserId);
+        if (!profileData || typeof profileData !== 'object') return res.status(400).json({ error: 'Dữ liệu hồ sơ không hợp lệ.' });
+        const storedProfileData = { ...profileData };
+        const storedImages = Array.isArray(profileData.images)
+          ? await Promise.all(profileData.images.filter((image: any) => typeof image === 'string' && image).map((image: string) => storeMediaDataUrl(image, 'profile-images')))
+          : null;
+        delete storedProfileData.images;
+        const profileJson = JSON.stringify(storedProfileData);
        try {
             await db.execute("UPDATE users SET profile_data = ? WHERE id = ?", [profileJson, userId]);
-            if (profileData.images && Array.isArray(profileData.images)) {
+             if (storedImages) {
               await db.execute("DELETE FROM user_images WHERE user_id = ?", [userId]);
-              for (const img of profileData.images) {
+               for (const img of storedImages) {
                 if (img) await db.execute("INSERT INTO user_images (user_id, image_url) VALUES (?, ?)", [userId, img]);
               }
             }
@@ -1987,9 +2184,10 @@ Bạn là "Cupid AI" - một chuyên gia tư vấn tâm lý tình yêu, tình b�
       if (!wavFormat || wavFormat.encoding !== 1 || wavFormat.channels !== 1 || wavFormat.sampleRate !== 24000 || wavFormat.bits !== 16 || Math.abs(durationSeconds - 15) > 0.01) {
         return res.status(400).json({ success: false, error: 'Đoạn nhạc phải là âm thanh PCM mono dài đúng 15 giây.' });
       }
+      const storedSongData = await storeMediaDataUrl(songData, 'songs');
       await db.execute(
         "INSERT INTO user_songs (user_id, song_title, song_data, mime_type, duration_seconds) VALUES (?, ?, ?, 'audio/wav', ?) ON DUPLICATE KEY UPDATE song_title = VALUES(song_title), song_data = VALUES(song_data), mime_type = VALUES(mime_type), duration_seconds = VALUES(duration_seconds)",
-        [userId, songTitle.trim(), songData, durationSeconds]
+        [userId, songTitle.trim(), storedSongData, durationSeconds]
       );
       res.json({ success: true });
     } catch (e: any) {
@@ -2201,9 +2399,10 @@ Bạn là "Cupid AI" - một chuyên gia tư vấn tâm lý tình yêu, tình b�
         }
       }
       const caption = String(moment.caption || '').trim().slice(0, 255);
+      const storedImageUrl = await storeMediaDataUrl(moment.imageUrl, 'moments');
       const [insertResult]: any = await connection.execute(
         'INSERT INTO moments (user_id, image_url, caption, audience) VALUES (?, ?, ?, ?)',
-        [userId, moment.imageUrl, caption || null, audience]
+        [userId, storedImageUrl, caption || null, audience]
       );
       const momentId = Number(insertResult.insertId);
       if (audience === 'selected') {
@@ -2216,6 +2415,7 @@ Bạn là "Cupid AI" - một chuyên gia tư vấn tâm lý tình yêu, tình b�
         success: true,
         data: {
           ...moment,
+          imageUrl: storedImageUrl,
           id: momentId,
           userId,
           caption,
@@ -2933,3 +3133,4 @@ Bạn là "Cupid AI" - một chuyên gia tư vấn tâm lý tình yêu, tình b�
 }
 
 startServer();
+
