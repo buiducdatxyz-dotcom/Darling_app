@@ -620,4 +620,3 @@ export function SetupLocation({ onNavigate }: SetupProps) {
     </div>
   );
 }
-
