@@ -425,10 +425,40 @@ function calculateDistanceKm(origin: any, destination: any): number | null {
   return Math.round(6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a)));
 }
 
+async function executeSchemaQuery(sql: string, params: any[] = []): Promise<any> {
+  const maxAttempts = 4;
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    try {
+      return await db.execute(sql, params);
+    } catch (err: any) {
+      const code = String(err?.code || '');
+      const isRetryableLockError = code === 'ER_LOCK_DEADLOCK' || code === 'ER_LOCK_WAIT_TIMEOUT';
+      if (!isRetryableLockError || attempt === maxAttempts - 1) throw err;
+
+      const delayMs = 150 * (2 ** attempt);
+      console.warn(`Schema initialization hit ${code}; retrying in ${delayMs}ms.`);
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+    }
+  }
+
+  throw new Error('Schema initialization query exhausted its retry limit.');
+}
+
 async function startServer() {
+  let schemaLockConnection: any = null;
+  let schemaLockAcquired = false;
   try {
+    if (dbPool) {
+      schemaLockConnection = await dbPool.getConnection();
+      const [lockRows]: any = await schemaLockConnection.execute(
+        "SELECT GET_LOCK('darling_app_schema_initialization', 90) AS acquired"
+      );
+      schemaLockAcquired = Number(lockRows?.[0]?.acquired) === 1;
+      if (!schemaLockAcquired) throw new Error('Timed out waiting for the database schema initialization lock.');
+    }
+
     // Create base tables users and user_images first
-    await db.execute(`
+    await executeSchemaQuery(`
       CREATE TABLE IF NOT EXISTS users (
         id INT AUTO_INCREMENT PRIMARY KEY,
         email VARCHAR(255) UNIQUE NOT NULL,
@@ -440,7 +470,7 @@ async function startServer() {
       )
     `);
 
-    await db.execute(`
+    await executeSchemaQuery(`
       CREATE TABLE IF NOT EXISTS user_images (
         id INT AUTO_INCREMENT PRIMARY KEY,
         user_id INT NOT NULL,
@@ -452,18 +482,18 @@ async function startServer() {
 
     // Add a server-owned premium flag; client-side UI state must never grant access.
     try {
-      await db.execute("ALTER TABLE users ADD COLUMN is_premium BOOLEAN NOT NULL DEFAULT FALSE");
+      await executeSchemaQuery("ALTER TABLE users ADD COLUMN is_premium BOOLEAN NOT NULL DEFAULT FALSE");
     } catch (err: any) {
       if (err.errno !== 1060 && !String(err.message || '').toLowerCase().includes('duplicate column')) throw err;
     }
 
     try {
-      await db.execute("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE");
+      await executeSchemaQuery("ALTER TABLE users ADD COLUMN is_admin BOOLEAN NOT NULL DEFAULT FALSE");
     } catch (err: any) {
       if (err.errno !== 1060 && !String(err.message || '').toLowerCase().includes('duplicate column')) throw err;
     }
 
-    await db.execute(`
+    await executeSchemaQuery(`
       CREATE TABLE IF NOT EXISTS advertisements (
         id INT AUTO_INCREMENT PRIMARY KEY,
         title VARCHAR(255) NOT NULL,
@@ -480,7 +510,7 @@ async function startServer() {
     `);
 
     // Swipes (friend request/like)
-    await db.execute(`
+    await executeSchemaQuery(`
       CREATE TABLE IF NOT EXISTS swipes (
         id INT AUTO_INCREMENT PRIMARY KEY,
         user_id INT NOT NULL,
@@ -490,7 +520,7 @@ async function startServer() {
         UNIQUE(user_id, target_user_id)
       )
     `);
-    await db.execute(`
+    await executeSchemaQuery(`
       CREATE TABLE IF NOT EXISTS profile_impressions (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
         user_id INT NOT NULL,
@@ -500,7 +530,7 @@ async function startServer() {
         INDEX idx_profile_impressions_target (target_user_id)
       )
     `);
-    await db.execute(`
+    await executeSchemaQuery(`
       CREATE TABLE IF NOT EXISTS daily_feature_usage (
         user_id INT NOT NULL,
         usage_date DATE NOT NULL,
@@ -510,7 +540,7 @@ async function startServer() {
         INDEX idx_daily_usage_date (usage_date, feature)
       )
     `);
-    await db.execute(`
+    await executeSchemaQuery(`
       CREATE TABLE IF NOT EXISTS matches (
         id INT AUTO_INCREMENT PRIMARY KEY,
         user1_id INT NOT NULL,
@@ -519,7 +549,7 @@ async function startServer() {
         UNIQUE KEY unique_match (user1_id, user2_id)
       )
     `);
-    await db.execute(`
+    await executeSchemaQuery(`
       CREATE TABLE IF NOT EXISTS messages (
         id INT AUTO_INCREMENT PRIMARY KEY,
         match_id INT NOT NULL,
@@ -529,7 +559,7 @@ async function startServer() {
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    await db.execute(`
+    await executeSchemaQuery(`
       CREATE TABLE IF NOT EXISTS moments (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
         user_id BIGINT UNSIGNED NOT NULL,
@@ -542,23 +572,23 @@ async function startServer() {
         INDEX idx_moments_user_created (user_id, created_at)
       )
     `);
-    const [momentColumns]: any = await db.execute('SHOW COLUMNS FROM moments');
+    const [momentColumns]: any = await executeSchemaQuery('SHOW COLUMNS FROM moments');
     const momentColumnNames = new Set((momentColumns || []).map((column: any) => String(column.Field)));
     if (!momentColumnNames.has('image_url')) {
-      await db.execute('ALTER TABLE moments ADD COLUMN image_url LONGTEXT NULL');
+      await executeSchemaQuery('ALTER TABLE moments ADD COLUMN image_url LONGTEXT NULL');
       if (momentColumnNames.has('moment_data')) {
-        await db.execute(`UPDATE moments SET image_url = JSON_UNQUOTE(JSON_EXTRACT(moment_data, '$.imageUrl')) WHERE image_url IS NULL`);
+        await executeSchemaQuery(`UPDATE moments SET image_url = JSON_UNQUOTE(JSON_EXTRACT(moment_data, '$.imageUrl')) WHERE image_url IS NULL`);
       }
     } else {
       // Widen the existing 1024-character URL column to support captured image data until object storage is configured.
-      await db.execute('ALTER TABLE moments MODIFY COLUMN image_url LONGTEXT NOT NULL');
+      await executeSchemaQuery('ALTER TABLE moments MODIFY COLUMN image_url LONGTEXT NOT NULL');
     }
-    if (!momentColumnNames.has('caption')) await db.execute('ALTER TABLE moments ADD COLUMN caption VARCHAR(255) NULL');
-    if (!momentColumnNames.has('audience')) await db.execute("ALTER TABLE moments ADD COLUMN audience ENUM('lover', 'friends', 'all', 'selected') NOT NULL DEFAULT 'friends'");
-    else await db.execute("ALTER TABLE moments MODIFY COLUMN audience ENUM('lover', 'friends', 'all', 'selected') NOT NULL DEFAULT 'friends'");
-    await db.execute('ALTER TABLE moments MODIFY COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT');
+    if (!momentColumnNames.has('caption')) await executeSchemaQuery('ALTER TABLE moments ADD COLUMN caption VARCHAR(255) NULL');
+    if (!momentColumnNames.has('audience')) await executeSchemaQuery("ALTER TABLE moments ADD COLUMN audience ENUM('lover', 'friends', 'all', 'selected') NOT NULL DEFAULT 'friends'");
+    else await executeSchemaQuery("ALTER TABLE moments MODIFY COLUMN audience ENUM('lover', 'friends', 'all', 'selected') NOT NULL DEFAULT 'friends'");
+    await executeSchemaQuery('ALTER TABLE moments MODIFY COLUMN id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT');
     const getIndexes = async (table: string) => {
-      const [rows]: any = await db.execute(`SHOW INDEX FROM ${table}`);
+      const [rows]: any = await executeSchemaQuery(`SHOW INDEX FROM ${table}`);
       const grouped = new Map<string, any[]>();
       for (const row of rows || []) {
         const name = String(row.Key_name || '');
@@ -577,7 +607,7 @@ async function startServer() {
           && (!unique || (actual.length === wanted.length && Number(sorted[0]?.Non_unique) === 0));
       });
       if (alreadyCovered) return;
-      try { await db.execute(`CREATE ${unique ? 'UNIQUE ' : ''}INDEX ${name} ON ${table} (${columns})`); }
+      try { await executeSchemaQuery(`CREATE ${unique ? 'UNIQUE ' : ''}INDEX ${name} ON ${table} (${columns})`); }
       catch (err: any) { if (err.errno !== 1061 && !String(err.message || '').toLowerCase().includes('duplicate key name')) throw err; }
     };
     const dropIndexIfEquivalentExists = async (table: string, redundantName: string) => {
@@ -593,11 +623,11 @@ async function startServer() {
         return other.map(row => String(row.Column_name)).join(',') === columns
           && (!redundantIsUnique || Number(other[0]?.Non_unique) === 0);
       });
-      if (hasEquivalent) await db.execute(`ALTER TABLE ${table} DROP INDEX ${redundantName}`);
+      if (hasEquivalent) await executeSchemaQuery(`ALTER TABLE ${table} DROP INDEX ${redundantName}`);
     };
     await ensureIndex('moments', 'idx_moments_user_created', 'user_id, created_at');
     await dropIndexIfEquivalentExists('moments', 'idx_moments_user_created');
-    await db.execute(`
+    await executeSchemaQuery(`
       CREATE TABLE IF NOT EXISTS moment_reactions (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
         moment_id BIGINT UNSIGNED NOT NULL,
@@ -607,7 +637,7 @@ async function startServer() {
         UNIQUE KEY unique_moment_reaction (moment_id, user_id)
       )
     `);
-    await db.execute(`
+    await executeSchemaQuery(`
       CREATE TABLE IF NOT EXISTS moment_recipients (
         moment_id BIGINT UNSIGNED NOT NULL,
         user_id INT NOT NULL,
@@ -623,12 +653,12 @@ async function startServer() {
     });
     if (!hasUniqueMomentReaction) {
       // Keep the newest reaction if a legacy schema allowed duplicates before adding the constraint.
-      await db.execute(`DELETE older FROM moment_reactions older
+      await executeSchemaQuery(`DELETE older FROM moment_reactions older
         INNER JOIN moment_reactions newer
           ON newer.moment_id = older.moment_id AND newer.user_id = older.user_id AND newer.id > older.id`);
       await ensureIndex('moment_reactions', 'unique_moment_reaction', 'moment_id, user_id', true);
     }
-    await db.execute(`
+    await executeSchemaQuery(`
       CREATE TABLE IF NOT EXISTS friend_requests (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
         sender_id INT NOT NULL,
@@ -646,19 +676,19 @@ async function startServer() {
     const adminPassword = process.env.ADMIN_PASSWORD;
     if (adminEmail && adminPassword) {
       if (adminPassword.length < 16) throw new Error('ADMIN_PASSWORD must be at least 16 characters.');
-      const [adminRows]: any = await db.execute('SELECT id FROM users WHERE email = ? LIMIT 1', [adminEmail]);
+      const [adminRows]: any = await executeSchemaQuery('SELECT id FROM users WHERE email = ? LIMIT 1', [adminEmail]);
       if (adminRows?.length) {
-        await db.execute('UPDATE users SET is_admin = TRUE WHERE id = ?', [adminRows[0].id]);
+        await executeSchemaQuery('UPDATE users SET is_admin = TRUE WHERE id = ?', [adminRows[0].id]);
       } else {
         const passwordHash = await bcrypt.hash(adminPassword, 12);
-        await db.execute('INSERT INTO users (email, password, is_admin) VALUES (?, ?, TRUE)', [adminEmail, passwordHash]);
+        await executeSchemaQuery('INSERT INTO users (email, password, is_admin) VALUES (?, ?, TRUE)', [adminEmail, passwordHash]);
       }
       console.log(`Administrator bootstrap is enabled for ${adminEmail}.`);
     }
     try {
-      await db.execute('ALTER TABLE messages MODIFY COLUMN text LONGTEXT');
+      await executeSchemaQuery('ALTER TABLE messages MODIFY COLUMN text LONGTEXT');
     } catch(e) {}
-    await db.execute(`
+    await executeSchemaQuery(`
       CREATE TABLE IF NOT EXISTS user_songs (
         user_id INT PRIMARY KEY,
         song_title VARCHAR(255),
@@ -667,11 +697,11 @@ async function startServer() {
         duration_seconds DECIMAL(5,2) NOT NULL DEFAULT 15.00
       )
     `);
-    const [songColumns]: any = await db.execute('SHOW COLUMNS FROM user_songs');
+    const [songColumns]: any = await executeSchemaQuery('SHOW COLUMNS FROM user_songs');
     const songColumnNames = new Set((songColumns || []).map((column: any) => String(column.Field)));
-    if (!songColumnNames.has('mime_type')) await db.execute("ALTER TABLE user_songs ADD COLUMN mime_type VARCHAR(100) NOT NULL DEFAULT 'audio/wav'");
-    if (!songColumnNames.has('duration_seconds')) await db.execute('ALTER TABLE user_songs ADD COLUMN duration_seconds DECIMAL(5,2) NOT NULL DEFAULT 15.00');
-    await db.execute(`
+    if (!songColumnNames.has('mime_type')) await executeSchemaQuery("ALTER TABLE user_songs ADD COLUMN mime_type VARCHAR(100) NOT NULL DEFAULT 'audio/wav'");
+    if (!songColumnNames.has('duration_seconds')) await executeSchemaQuery('ALTER TABLE user_songs ADD COLUMN duration_seconds DECIMAL(5,2) NOT NULL DEFAULT 15.00');
+    await executeSchemaQuery(`
       CREATE TABLE IF NOT EXISTS subscriptions (
         id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
         user_id INT NOT NULL,
@@ -683,23 +713,23 @@ async function startServer() {
         INDEX idx_subscriptions_user_expiry (user_id, expires_at)
       )
     `);
-    const [subscriptionColumns]: any = await db.execute('SHOW COLUMNS FROM subscriptions');
+    const [subscriptionColumns]: any = await executeSchemaQuery('SHOW COLUMNS FROM subscriptions');
     const subscriptionColumnNames = new Set((subscriptionColumns || []).map((column: any) => String(column.Field)));
-    if (!subscriptionColumnNames.has('promo_code')) await db.execute('ALTER TABLE subscriptions ADD COLUMN promo_code VARCHAR(64) NULL');
+    if (!subscriptionColumnNames.has('promo_code')) await executeSchemaQuery('ALTER TABLE subscriptions ADD COLUMN promo_code VARCHAR(64) NULL');
     await ensureIndex('subscriptions', 'idx_subscriptions_user_expiry', 'user_id, expires_at');
     await ensureIndex('subscriptions', 'unique_subscription_promo', 'user_id, promo_code', true);
     try {
-      await db.execute('ALTER TABLE users ADD COLUMN premium_expires_at DATETIME NULL');
+      await executeSchemaQuery('ALTER TABLE users ADD COLUMN premium_expires_at DATETIME NULL');
     } catch (err: any) {
       if (err.errno !== 1060 && !String(err.message || '').toLowerCase().includes('duplicate column')) throw err;
     }
-    await db.execute(`
+    await executeSchemaQuery(`
       CREATE TABLE IF NOT EXISTS interests (
         id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
         name VARCHAR(100) NOT NULL UNIQUE
       )
     `);
-    await db.execute(`
+    await executeSchemaQuery(`
       CREATE TABLE IF NOT EXISTS user_interests (
         user_id INT NOT NULL,
         interest_id INT NOT NULL,
@@ -707,7 +737,7 @@ async function startServer() {
         INDEX idx_user_interests_interest (interest_id, user_id)
       )
     `);
-    await db.execute(`
+    await executeSchemaQuery(`
       CREATE TABLE IF NOT EXISTS user_preferences (
         user_id INT PRIMARY KEY,
         min_age INT DEFAULT 18,
@@ -722,7 +752,7 @@ async function startServer() {
       )
     `);
     try {
-      await db.execute(`
+      await executeSchemaQuery(`
         ALTER TABLE user_preferences 
         MODIFY COLUMN search_gender ENUM('Nam', 'Nữ', 'Tất cả', 'LGBTQ+', 'Khác') DEFAULT 'Tất cả'
       `);
@@ -732,19 +762,19 @@ async function startServer() {
     }
     // Safe sequential column alterations to account for existing tables
     try {
-      await db.execute("ALTER TABLE user_preferences ADD COLUMN is_distance_flexible BOOLEAN DEFAULT TRUE");
+      await executeSchemaQuery("ALTER TABLE user_preferences ADD COLUMN is_distance_flexible BOOLEAN DEFAULT TRUE");
     } catch(e) {}
     try {
-      await db.execute("ALTER TABLE user_preferences ADD COLUMN is_age_flexible BOOLEAN DEFAULT TRUE");
+      await executeSchemaQuery("ALTER TABLE user_preferences ADD COLUMN is_age_flexible BOOLEAN DEFAULT TRUE");
     } catch(e) {}
     try {
-      await db.execute("ALTER TABLE user_preferences ADD COLUMN location VARCHAR(255) DEFAULT 'Hà Nội, Hà Nội'");
+      await executeSchemaQuery("ALTER TABLE user_preferences ADD COLUMN location VARCHAR(255) DEFAULT 'Hà Nội, Hà Nội'");
     } catch(e) {}
     try {
-      await db.execute("ALTER TABLE user_preferences ADD COLUMN active_priorities VARCHAR(255) DEFAULT 'Dành Cho Bạn'");
+      await executeSchemaQuery("ALTER TABLE user_preferences ADD COLUMN active_priorities VARCHAR(255) DEFAULT 'Dành Cho Bạn'");
     } catch(e) {}
 
-    await db.execute("ALTER TABLE user_images MODIFY image_url LONGTEXT");
+    await executeSchemaQuery("ALTER TABLE user_images MODIFY image_url LONGTEXT");
 
     // Dynamic Safe Database Index Initialization block to maximize query speeds
     const tryAddIndex = async (tableName: string, indexName: string, columns: string, isUnique = false) => {
@@ -768,6 +798,18 @@ async function startServer() {
       throw new Error(`Database schema initialization failed: ${e.message || 'unknown error'}`);
     }
     console.log("Note: Could not alter or create tables / indexes. Assuming it is ok or DB is not connected.", e.message);
+  } finally {
+    if (schemaLockConnection) {
+      try {
+        if (schemaLockAcquired) {
+          await schemaLockConnection.execute("SELECT RELEASE_LOCK('darling_app_schema_initialization')");
+        }
+      } catch (releaseError: any) {
+        console.warn('Could not release database schema initialization lock:', releaseError?.message || releaseError);
+      } finally {
+        schemaLockConnection.release();
+      }
+    }
   }
 
   const app = express();
