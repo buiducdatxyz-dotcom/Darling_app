@@ -4,6 +4,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { ViewState } from '../types';
 import { Heart } from 'lucide-react';
 import { AppContext } from './MainApp';
+import { MIN_PASSWORD_LENGTH, validateRegistrationCredentials } from '../utils/registration';
 
 interface AuthProps {
   onNavigate: (view: ViewState) => void;
@@ -189,44 +190,31 @@ export function Login({ onNavigate, onLoginSuccess }: AuthProps) {
 }
 
 export function Register({ onNavigate, onLoginSuccess }: AuthProps) {
-  const [email, setEmail] = React.useState('');
-  const [password, setPassword] = React.useState('');
-  const [confirmPassword, setConfirmPassword] = React.useState('');
+  const { resetSetupData } = React.useContext(AppContext);
+  const [email, setEmail] = React.useState(() => sessionStorage.getItem('temp_register_email') || '');
+  const [password, setPassword] = React.useState(() => sessionStorage.getItem('temp_register_password') || '');
+  const [confirmPassword, setConfirmPassword] = React.useState(() => sessionStorage.getItem('temp_register_password') || '');
   const [error, setError] = React.useState('');
 
   const handleRegister = () => {
-    if (!email || !password || !confirmPassword) {
-      setError('Vui lòng nhập đầy đủ thông tin');
-      return;
-    }
-    if (password !== confirmPassword) {
-      setError('Mật khẩu không khớp!');
+    const cleanEmail = email.trim().toLowerCase();
+    const validationError = validateRegistrationCredentials(cleanEmail, password, confirmPassword);
+    if (validationError) {
+      setError(validationError);
       return;
     }
     setError('');
-    const cleanEmail = email.trim().toLowerCase();
-    
-    // Store temporarily in memory or pass through a global state
+
+    const draftEmail = sessionStorage.getItem('setup_draft_email')?.trim().toLowerCase();
+    if (draftEmail !== cleanEmail) resetSetupData();
     sessionStorage.setItem('temp_register_email', cleanEmail);
     sessionStorage.setItem('temp_register_password', password);
+    sessionStorage.setItem('setup_draft_email', cleanEmail);
     onNavigate('setup_basic');
   };
 
   return (
     <div className="min-h-screen bg-[#eaf4ff] flex flex-col items-center justify-center p-6 text-slate-800 font-sans box-border relative overflow-hidden">
-      <AnimatePresence>
-        {error && (
-          <motion.div 
-            initial={{ opacity: 0, y: -20 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -20 }}
-            className="absolute top-10 bg-red-500 text-white px-6 py-3 rounded-full text-sm font-medium z-50 shadow-lg text-center"
-          >
-            {error}
-          </motion.div>
-        )}
-      </AnimatePresence>
-
       <motion.div 
         key="form"
         initial={{ opacity: 0, x: -50 }}
@@ -236,44 +224,58 @@ export function Register({ onNavigate, onLoginSuccess }: AuthProps) {
       >
         <h1 className="text-[28px] font-bold mb-8 tracking-tight">Đăng ký</h1>
         
-        <div className="w-full flex flex-col gap-3">
+        <form noValidate onSubmit={(event) => { event.preventDefault(); handleRegister(); }} className="w-full flex flex-col gap-3">
           <input 
             type="email" 
             value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            onChange={(e) => { setEmail(e.target.value); setError(''); }}
             placeholder="Email của bạn" 
+            autoComplete="email"
+            required
             className="w-full px-4 py-3 rounded-[10px] border-none bg-white font-medium placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-white"
           />
           <input 
             type="password" 
             value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            onChange={(e) => { setPassword(e.target.value); setError(''); }}
             placeholder="Mật khẩu" 
+            autoComplete="new-password"
+            minLength={MIN_PASSWORD_LENGTH}
+            required
+            aria-describedby="register-password-help"
             className="w-full px-4 py-3 rounded-[10px] border-none bg-white font-medium placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-white"
           />
+          <p id="register-password-help" className="-mt-2 px-1 text-xs text-slate-600">Mật khẩu cần có ít nhất {MIN_PASSWORD_LENGTH} ký tự.</p>
           <input 
             type="password" 
             value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
+            onChange={(e) => { setConfirmPassword(e.target.value); setError(''); }}
             placeholder="Nhập lại mật khẩu" 
+            autoComplete="new-password"
+            minLength={MIN_PASSWORD_LENGTH}
+            required
             className="w-full px-4 py-3 rounded-[10px] border-none bg-white font-medium placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-white"
           />
+
+          {error && <p role="alert" className="rounded-lg bg-red-50 px-3 py-2 text-sm font-medium text-red-700">{error}</p>}
           
           <button 
-            onClick={handleRegister}
+            type="submit"
             className="w-full py-3.5 rounded-[10px] font-medium text-white shadow-sm bg-[#0a84ff] active:bg-[#0070e0] transition-colors flex items-center justify-center gap-2 mt-4"
           >
             Đăng ký
           </button>
           
           <button 
+            type="button"
             onClick={() => onNavigate('login')}
             className="w-full py-3.5 rounded-[10px] font-medium text-white shadow-sm bg-gray-400 transition-colors"
           >
             Quay lại đăng nhập
           </button>
-        </div>
+        </form>
       </motion.div>
     </div>
   );
 }
+
