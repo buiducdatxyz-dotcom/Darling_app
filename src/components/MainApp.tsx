@@ -278,7 +278,7 @@ export const AppContext = React.createContext<{
   updateSetupData: (data: any) => void;
   globalMatchModal: any;
   setGlobalMatchModal: (p: any) => void;
-  fetchMoreUsers: (includeViewed?: boolean) => void;
+  fetchMoreUsers: (includeViewed?: boolean | 'replay') => Promise<boolean>;
   replayProfiles: () => Promise<boolean>;
 }>({ 
   serverUsers: [],
@@ -289,7 +289,7 @@ export const AppContext = React.createContext<{
   toggleSave: () => {},
   swipedRecords: [],
   registerSwipe: () => {},
-  fetchMoreUsers: () => {},
+  fetchMoreUsers: async () => false,
   replayProfiles: async () => false,
   isSavingPref: false,
   saveSettings: async () => false,
@@ -492,11 +492,12 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
     setMyProfile(prev => ({ ...prev, ...newProfileInfo }));
   };
 
-  const fetchMoreUsers = React.useCallback((includeViewed = false) => {
-     apiFetch(`/api/users/explore${includeViewed ? '?forExplore=1' : ''}`)
-       .then(r => r.json())
-       .then(data => {
-            if (data.success && data.data) {
+  const fetchMoreUsers = React.useCallback((includeViewed: boolean | 'replay' = false): Promise<boolean> => {
+     const query = includeViewed === 'replay' ? '?forReplay=1' : includeViewed ? '?forExplore=1' : '';
+     return apiFetch(`/api/users/explore${query}`)
+       .then(async response => ({ ok: response.ok, data: await response.json().catch(() => ({})) }))
+       .then(({ ok, data }) => {
+            if (ok && data.success && Array.isArray(data.data)) {
                 const userList = data.data.map((u:any) => {
                    let profileData = u.profile_data || {};
                     if (typeof profileData === 'string') {
@@ -557,18 +558,19 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
                });
                const myId = parseInt(sessionStorage.getItem('user_id') || localStorage.getItem('user_id') || '0');
                const eligibleUsers = userList.filter((u:any) => Number(u.id) !== myId && u.images.length > 0);
-               if (includeViewed) setExploreUsers(eligibleUsers);
+               if (includeViewed === true) setExploreUsers(eligibleUsers);
                else setServerUsers(eligibleUsers);
-           }
-       }).catch(()=>{});
+               return true;
+            }
+            return false;
+       }).catch(()=>false);
   }, [myProfile]);
 
   const replayProfiles = React.useCallback(async () => {
     try {
-      const response = await apiFetch('/api/users/replay', { method: 'POST' });
-      if (!response.ok) return false;
+      const replayed = await fetchMoreUsers('replay');
+      if (!replayed) return false;
       setSwipedRecords(previous => previous.filter(record => record.action === 'like'));
-      fetchMoreUsers();
       return true;
     } catch {
       return false;
