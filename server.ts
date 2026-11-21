@@ -2212,10 +2212,15 @@ Bạn là "Cupid AI" - một chuyên gia tư vấn tâm lý tình yêu, tình b�
   app.post('/api/users/replay', async (req, res) => {
     const userId = Number(req.authUserId);
     try {
-      const hasPremium = await hasActivePremium(userId);
+      const mockUser = mockUsers.find((user: any) => Number(user.id) === userId);
+      const profileData = typeof mockUser?.profile_data === 'string'
+        ? (() => { try { return JSON.parse(mockUser.profile_data); } catch { return {}; } })()
+        : (mockUser?.profile_data || {});
+      const hasPremium = dbPool
+        ? await hasActivePremium(userId)
+        : Boolean(mockUser?.is_premium || mockUser?.isPremium || profileData.isPremium);
       if (!hasPremium) return res.status(403).json({ success: false, error: 'TÃ­nh nÄƒng xem láº¡i há»“ sÆ¡ chá»‰ dÃ nh cho tÃ i khoáº£n Premium.' });
-      await db.execute('DELETE FROM profile_impressions WHERE user_id = ?', [userId]);
-      await db.execute("DELETE FROM swipes WHERE user_id = ? AND action = 'pass'", [userId]);
+      // Replay is read-only. The feed query selects eligible profiles without deleting history or taking row locks.
       return res.json({ success: true });
     } catch (error: any) {
       console.error('Could not reset profile history:', error.code || error.message);
@@ -2539,12 +2544,29 @@ Bạn là "Cupid AI" - một chuyên gia tư vấn tâm lý tình yêu, tình b�
 
   // Fetch users for Explore View
   app.get("/api/users/explore", async (req, res) => {
+    const currentUserId = Number(req.authUserId);
+    const includeViewed = req.query.forExplore === '1';
+    const replayMode = req.query.forReplay === '1';
     try {
-      const currentUserId = Number(req.authUserId);
-      const includeViewed = req.query.forExplore === '1';
+      if (replayMode && !(await hasActivePremium(currentUserId))) {
+        return res.status(403).json({ success: false, error: 'TÃ­nh nÄƒng xem láº¡i há»“ sÆ¡ chá»‰ dÃ nh cho tÃ i khoáº£n Premium.' });
+      }
       const [userRows]: any = includeViewed
         ? await db.execute('SELECT u.id, u.profile_data, u.created_at, u.is_premium FROM users u WHERE u.id <> ?', [currentUserId])
-        : await db.execute(`SELECT u.id, u.profile_data, u.created_at, u.is_premium FROM users u
+        : replayMode
+          ? await db.execute(`SELECT u.id, u.profile_data, u.created_at, u.is_premium FROM users u
+            LEFT JOIN swipes liked ON liked.user_id = ? AND liked.target_user_id = u.id AND liked.action = 'like'
+            WHERE u.id <> ? AND liked.id IS NULL
+              AND NOT EXISTS (
+                SELECT 1 FROM friend_requests fr
+                WHERE ((fr.sender_id = ? AND fr.receiver_id = u.id) OR (fr.sender_id = u.id AND fr.receiver_id = ?))
+                  AND fr.status IN ('pending', 'accepted')
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM matches mt
+                WHERE (mt.user1_id = ? AND mt.user2_id = u.id) OR (mt.user2_id = ? AND mt.user1_id = u.id)
+              )`, [currentUserId, currentUserId, currentUserId, currentUserId, currentUserId, currentUserId])
+          : await db.execute(`SELECT u.id, u.profile_data, u.created_at, u.is_premium FROM users u
             LEFT JOIN swipes s ON s.user_id = ? AND s.target_user_id = u.id
             LEFT JOIN profile_impressions i ON i.user_id = ? AND i.target_user_id = u.id
             WHERE u.id <> ? AND s.id IS NULL AND i.id IS NULL
@@ -2649,8 +2671,24 @@ Bạn là "Cupid AI" - một chuyên gia tư vấn tâm lý tình yêu, tình b�
           error: 'Không đọc được hồ sơ từ MySQL. Kiểm tra kết nối tại /api/health và xác nhận các bảng users, swipes, user_images, user_songs đã tồn tại.'
         });
       }
-      const swipedIds = new Set(mockSwipes.filter((swipe: any) => Number(swipe.user_id) === Number(req.authUserId)).map((swipe: any) => Number(swipe.target_user_id)));
-      const publicUsers = mockUsers.filter(user => Number(user.id) !== Number(req.authUserId) && !swipedIds.has(Number(user.id)))
+      const replayMode = req.query.forReplay === '1';
+      const currentMockUser = mockUsers.find((user: any) => Number(user.id) === Number(req.authUserId));
+      const currentMockProfile = typeof currentMockUser?.profile_data === 'string'
+        ? (() => { try { return JSON.parse(currentMockUser.profile_data); } catch { return {}; } })()
+        : (currentMockUser?.profile_data || {});
+      if (replayMode && !Boolean(currentMockUser?.is_premium || currentMockUser?.isPremium || currentMockProfile.isPremium)) {
+        return res.status(403).json({ success: false, error: 'TÃ­nh nÄƒng xem láº¡i há»“ sÆ¡ chá»‰ dÃ nh cho tÃ i khoáº£n Premium.' });
+      }
+      const swipedIds = new Set(mockSwipes
+        .filter((swipe: any) => Number(swipe.user_id) === Number(req.authUserId))
+        .filter((swipe: any) => replayMode
+          ? String(swipe.action).toLowerCase() === 'like'
+          : !includeViewed)
+        .map((swipe: any) => Number(swipe.target_user_id)));
+      const matchedIds = new Set(mockMatches
+        .filter((match: any) => Number(match.user1_id) === Number(req.authUserId) || Number(match.user2_id) === Number(req.authUserId))
+        .map((match: any) => Number(match.user1_id) === Number(req.authUserId) ? Number(match.user2_id) : Number(match.user1_id)));
+      const publicUsers = mockUsers.filter(user => Number(user.id) !== Number(req.authUserId) && !swipedIds.has(Number(user.id)) && !matchedIds.has(Number(user.id)))
         .map(user => {
           const profileData = typeof user.profile_data === 'string'
             ? (() => { try { return JSON.parse(user.profile_data); } catch { return {}; } })()
