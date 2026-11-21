@@ -148,10 +148,16 @@ export function SetupBasic({ onNavigate }: SetupProps) {
       </div>
 
       <div className="shrink-0 pt-4 flex justify-center mt-auto">
-        <div className="max-w-[340px] w-full">
+        <div className="max-w-[340px] w-full flex gap-3">
+          <button
+            onClick={() => onNavigate('register')}
+            className="flex-1 py-3.5 rounded-xl font-bold text-slate-800 bg-white active:bg-slate-100 transition-colors shadow-sm text-[15px]"
+          >
+            Sửa email/mật khẩu
+          </button>
           <button 
             onClick={handleNext}
-            className="w-full py-3.5 rounded-xl font-bold text-white bg-[#ff2d55] active:bg-[#e02045] transition-colors shadow-sm text-[15px]"
+            className="flex-1 py-3.5 rounded-xl font-bold text-white bg-[#ff2d55] active:bg-[#e02045] transition-colors shadow-sm text-[15px]"
           >
             Tiếp theo
           </button>
@@ -339,9 +345,12 @@ export function SetupInterests({ onNavigate }: SetupProps) {
 }
 
 export function SetupLocation({ onNavigate }: SetupProps) {
-  const { setupData, updateSetupData, updateMyProfile, updateSettings } = React.useContext(AppContext);
+  const { setupData, updateSetupData, updateMyProfile, updateSettings, resetSetupData } = React.useContext(AppContext);
   const [error, setError] = React.useState('');
   const [isSubmitting, setIsSubmitting] = React.useState(false);
+  const pendingEmailForDisplay = sessionStorage.getItem('registration_pending_email')?.trim().toLowerCase();
+  const currentEmailForDisplay = sessionStorage.getItem('temp_register_email')?.trim().toLowerCase();
+  const isRegistrationPending = Boolean(pendingEmailForDisplay && pendingEmailForDisplay === currentEmailForDisplay);
 
   // Permission toggles
   const [allowCamera, setAllowCamera] = React.useState(true);
@@ -349,12 +358,29 @@ export function SetupLocation({ onNavigate }: SetupProps) {
   const [allowStorage, setAllowStorage] = React.useState(true);
 
   const requestPermissionsAndSave = async (skipPrompts = false) => {
+    const email = sessionStorage.getItem('temp_register_email')?.trim().toLowerCase();
+    const password = sessionStorage.getItem('temp_register_password');
+    const pendingEmail = sessionStorage.getItem('registration_pending_email')?.trim().toLowerCase();
+    const hasPendingRegistration = Boolean(
+      email && pendingEmail === email &&
+      sessionStorage.getItem('auth_token') &&
+      sessionStorage.getItem('user_id')
+    );
+    if (!email) {
+      setError('Không tìm thấy email đăng ký. Hãy quay lại nhập email và mật khẩu.');
+      return;
+    }
+    if (!hasPendingRegistration && !password) {
+      setError('Phiên đăng ký đã hết hạn. Hãy quay lại nhập lại mật khẩu.');
+      return;
+    }
+
     setIsSubmitting(true);
     setError('');
 
     let determinedLocation = setupData.location || 'Hà Nội, Hà Nội';
 
-    if (!skipPrompts) {
+    if (!skipPrompts && !hasPendingRegistration) {
       // 1. Camera permission request
       if (allowCamera && navigator.mediaDevices?.getUserMedia) {
         try {
@@ -409,34 +435,34 @@ export function SetupLocation({ onNavigate }: SetupProps) {
       localStorage.setItem('storage_permission_granted', 'true');
     }
 
-    const email = sessionStorage.getItem('temp_register_email');
-    const password = sessionStorage.getItem('temp_register_password');
-    
     try {
-      // 1. Create account
-      const regRes = await apiFetch('/api/auth/register', {
-         method: 'POST',
-         headers: { 'Content-Type': 'application/json' },
-         body: JSON.stringify({ email, password })
-      });
-      const regData = await regRes.json();
-      
-      if (!regRes.ok) {
-         setError(regData.error || 'Có lỗi xảy ra khi tạo tài khoản');
-         setIsSubmitting(false);
-         return;
-      }
+      let newUserId: number | string;
+      if (hasPendingRegistration) {
+        newUserId = sessionStorage.getItem('user_id')!;
+      } else {
+        // Create the account once; a profile-save retry reuses this session.
+        const regRes = await apiFetch('/api/auth/register', {
+           method: 'POST',
+           headers: { 'Content-Type': 'application/json' },
+           body: JSON.stringify({ email, password })
+        });
+        const regData = await regRes.json().catch(() => ({}));
+        if (!regRes.ok) {
+           setError(regData.error || 'Có lỗi xảy ra khi tạo tài khoản. Hãy kiểm tra thông tin và thử lại.');
+           return;
+        }
 
-      const newUserId = regData?.user?.id ?? regData?.userId;
-      if (!newUserId || !regData?.token) {
-        setError('Không thể tạo phiên đăng nhập an toàn. Vui lòng thử lại.');
-        setIsSubmitting(false);
-        return;
+        newUserId = regData?.user?.id ?? regData?.userId;
+        if (!newUserId || !regData?.token) {
+          setError('Tài khoản có thể đã được tạo nhưng phiên đăng nhập chưa sẵn sàng. Hãy đăng nhập bằng email này hoặc liên hệ hỗ trợ.');
+          return;
+        }
+        sessionStorage.setItem('auth_token', regData.token);
+        localStorage.setItem('auth_token', regData.token);
+        sessionStorage.setItem('user_id', String(newUserId));
+        localStorage.setItem('user_id', String(newUserId));
+        sessionStorage.setItem('registration_pending_email', email);
       }
-      sessionStorage.setItem('auth_token', regData.token);
-      localStorage.setItem('auth_token', regData.token);
-      sessionStorage.setItem('user_id', String(newUserId));
-      localStorage.setItem('user_id', String(newUserId));
 
       // 2. Save profile
       const profileRes = await apiFetch('/api/users/profile', {
@@ -446,7 +472,7 @@ export function SetupLocation({ onNavigate }: SetupProps) {
       });
       if (!profileRes.ok) {
         const profileError = await profileRes.json().catch(() => ({}));
-        throw new Error(profileError.error || 'Không lưu được hồ sơ. Vui lòng thử lại.');
+        throw new Error(profileError.error || 'Không lưu được hồ sơ. Tài khoản đã được tạo; hãy thử lưu lại.');
       }
 
       // Set global profile in context
@@ -482,12 +508,14 @@ export function SetupLocation({ onNavigate }: SetupProps) {
       });
 
       sessionStorage.removeItem('temp_register_password');
-
-      setIsSubmitting(false);
+      sessionStorage.removeItem('registration_pending_email');
+      sessionStorage.removeItem('setup_draft_email');
+      resetSetupData();
       onNavigate('welcome');
     } catch (err) {
       console.error(err);
-      setError('Lỗi kết nối đến máy chủ.');
+      setError(err instanceof Error ? err.message : 'Không thể kết nối đến máy chủ. Hãy kiểm tra mạng rồi thử lưu lại.');
+    } finally {
       setIsSubmitting(false);
     }
   };
@@ -573,7 +601,7 @@ export function SetupLocation({ onNavigate }: SetupProps) {
              disabled={isSubmitting}
              className="w-full py-3.5 mb-2 rounded-xl font-bold text-white bg-[#ff2d55] hover:bg-[#e0244b] active:scale-[0.98] transition-all shadow-md text-[15px] flex items-center justify-center gap-2"
           >
-             {isSubmitting ? 'Đang xử lý...' : 'Cho phép & Tiếp tục'}
+             {isSubmitting ? 'Đang xử lý...' : isRegistrationPending ? 'Thử lưu hồ sơ lại' : 'Cho phép & Tiếp tục'}
           </button>
 
           <button 
@@ -583,6 +611,24 @@ export function SetupLocation({ onNavigate }: SetupProps) {
           >
              Để sau (Bỏ qua)
           </button>
+          <button
+             type="button"
+             onClick={() => onNavigate('setup_interests')}
+             disabled={isSubmitting}
+             className="w-full py-2 text-xs font-semibold text-sky-700 hover:text-sky-900 transition-colors"
+          >
+             Quay lại sở thích
+          </button>
+          {error && !isRegistrationPending && (
+            <button
+               type="button"
+               onClick={() => onNavigate('register')}
+               disabled={isSubmitting}
+               className="w-full py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 transition-colors"
+            >
+               Quay lại sửa email/mật khẩu
+            </button>
+          )}
        </div>
     </div>
   );

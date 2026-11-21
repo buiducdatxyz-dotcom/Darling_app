@@ -66,7 +66,6 @@ export default function App() {
   const renderView = () => {
     if (isAppShellView) {
       return (
-        <GlobalAppStateProvider onNavigate={handleNavigate}>
           <AppShell currentView={currentView} onNavigate={handleNavigate}>
             <div className="absolute inset-0">
               <div className={`absolute inset-0 ${currentView === 'app_swipe' ? '' : 'invisible pointer-events-none'}`} aria-hidden={currentView !== 'app_swipe'}>
@@ -94,7 +93,6 @@ export default function App() {
               </AnimatePresence>
             </div>
           </AppShell>
-        </GlobalAppStateProvider>
       );
     }
 
@@ -125,22 +123,24 @@ export default function App() {
 
   return (
     <Suspense fallback={<div className="w-full h-[100dvh] flex items-center justify-center bg-sky-50 text-sky-700 font-semibold"><span className="mr-3 h-5 w-5 animate-spin rounded-full border-2 border-sky-600 border-t-transparent" />Đang tải ứng dụng…</div>}>
-      <div className="w-full h-[100dvh] bg-[#eef6ff] sm:bg-[#dbeafe] flex items-center justify-center relative overflow-hidden">
-        <div className="w-full h-full max-w-[450px] bg-[#eaf4ff] overflow-hidden relative shadow-2xl sm:rounded-[28px]">
-          <AnimatePresence mode="wait">
-            <motion.div
-              key={isAppShellView ? 'app_shell' : currentView}
-              initial={{ opacity: 0, y: 15 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -15 }}
-              transition={{ duration: 0.25, ease: "easeOut" }}
-              className="w-full h-full"
-            >
-              {renderView()}
-            </motion.div>
-          </AnimatePresence>
+      <GlobalAppStateProvider onNavigate={handleNavigate} enabled={isAppShellView}>
+        <div className="w-full h-[100dvh] bg-[#eef6ff] sm:bg-[#dbeafe] flex items-center justify-center relative overflow-hidden">
+          <div className="w-full h-full max-w-[450px] bg-[#eaf4ff] overflow-hidden relative shadow-2xl sm:rounded-[28px]">
+            <AnimatePresence mode="wait">
+              <motion.div
+                key={isAppShellView ? 'app_shell' : currentView}
+                initial={{ opacity: 0, y: 15 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -15 }}
+                transition={{ duration: 0.25, ease: "easeOut" }}
+                className="w-full h-full"
+              >
+                {renderView()}
+              </motion.div>
+            </AnimatePresence>
+          </div>
         </div>
-      </div>
+      </GlobalAppStateProvider>
     </Suspense>
   );
 }
