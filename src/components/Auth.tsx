@@ -278,4 +278,3 @@ export function Register({ onNavigate, onLoginSuccess }: AuthProps) {
     </div>
   );
 }
-
