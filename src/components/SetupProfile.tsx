@@ -348,6 +348,9 @@ export function SetupLocation({ onNavigate }: SetupProps) {
   const { setupData, updateSetupData, updateMyProfile, updateSettings, resetSetupData } = React.useContext(AppContext);
   const [error, setError] = React.useState('');
   const [isSubmitting, setIsSubmitting] = React.useState(false);
+  const pendingEmailForDisplay = sessionStorage.getItem('registration_pending_email')?.trim().toLowerCase();
+  const currentEmailForDisplay = sessionStorage.getItem('temp_register_email')?.trim().toLowerCase();
+  const isRegistrationPending = Boolean(pendingEmailForDisplay && pendingEmailForDisplay === currentEmailForDisplay);
 
   // Permission toggles
   const [allowCamera, setAllowCamera] = React.useState(true);
@@ -598,7 +601,7 @@ export function SetupLocation({ onNavigate }: SetupProps) {
              disabled={isSubmitting}
              className="w-full py-3.5 mb-2 rounded-xl font-bold text-white bg-[#ff2d55] hover:bg-[#e0244b] active:scale-[0.98] transition-all shadow-md text-[15px] flex items-center justify-center gap-2"
           >
-             {isSubmitting ? 'Đang xử lý...' : 'Cho phép & Tiếp tục'}
+             {isSubmitting ? 'Đang xử lý...' : isRegistrationPending ? 'Thử lưu hồ sơ lại' : 'Cho phép & Tiếp tục'}
           </button>
 
           <button 
@@ -616,6 +619,16 @@ export function SetupLocation({ onNavigate }: SetupProps) {
           >
              Quay lại sở thích
           </button>
+          {error && !isRegistrationPending && (
+            <button
+               type="button"
+               onClick={() => onNavigate('register')}
+               disabled={isSubmitting}
+               className="w-full py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 transition-colors"
+            >
+               Quay lại sửa email/mật khẩu
+            </button>
+          )}
        </div>
     </div>
   );
