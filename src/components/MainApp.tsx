@@ -276,6 +276,7 @@ export const AppContext = React.createContext<{
   updateMyProfile: (updatedData: Partial<typeof USER_PROFILE_DATA>) => void;
   setupData: any;
   updateSetupData: (data: any) => void;
+  resetSetupData: () => void;
   globalMatchModal: any;
   setGlobalMatchModal: (p: any) => void;
   fetchMoreUsers: (includeViewed?: boolean | 'replay') => Promise<boolean>;
@@ -312,12 +313,13 @@ export const AppContext = React.createContext<{
   updateMyProfile: () => {},
   setupData: {},
   updateSetupData: () => {},
+  resetSetupData: () => {},
   globalMatchModal: null,
   setGlobalMatchModal: () => {},
   logout: () => {}
 });
 
-export function GlobalAppStateProvider({ children, onNavigate }: { children: React.ReactNode, onNavigate?: (v: ViewState) => void }) {
+export function GlobalAppStateProvider({ children, onNavigate, enabled = true }: { children: React.ReactNode, onNavigate?: (v: ViewState) => void, enabled?: boolean }) {
   const [likedProfiles, setLikedProfiles] = useState<any[]>(() => {
     try {
       const d = localStorage.getItem('ais_liked');
@@ -425,6 +427,7 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
 
   React.useEffect(() => {
     const checkUserAndLoadPrefs = () => {
+      if (!enabled) return;
       const uId = sessionStorage.getItem('user_id') || localStorage.getItem('user_id');
       if (uId && uId !== lastLoadedUserId) {
         setLastLoadedUserId(uId);
@@ -476,7 +479,7 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
     checkUserAndLoadPrefs();
     const interval = setInterval(checkUserAndLoadPrefs, 1000);
     return () => clearInterval(interval);
-  }, [lastLoadedUserId]);
+  }, [lastLoadedUserId, enabled]);
 
   const updateSettings = (partialSettings: any) => {
     setSettings(prev => {
@@ -579,6 +582,7 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
 
   useEffect(() => {
      // Sync matches and historical swipes with backend database
+     if (!enabled) return;
      const userId = sessionStorage.getItem('user_id');
      if (userId) {
          apiFetch(`/api/matches/${userId}`)
@@ -608,11 +612,11 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
                }
            }).catch(()=>{});
      }
-  }, []);
+  }, [enabled]);
   
   React.useEffect(() => {
-     fetchMoreUsers();
-  }, [fetchMoreUsers]);
+     if (enabled) fetchMoreUsers();
+  }, [fetchMoreUsers, enabled]);
 
   React.useEffect(() => {
      try {
@@ -639,7 +643,7 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
   }, [myProfile]);
   
   React.useEffect(() => {
-     if (navigator.geolocation) {
+     if (enabled && localStorage.getItem('location_permission_granted') === 'true' && navigator.geolocation) {
          navigator.geolocation.getCurrentPosition((pos) => {
              const lat = pos.coords.latitude;
              const lng = pos.coords.longitude;
@@ -656,9 +660,10 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
              }
          }, () => {}, { timeout: 10000 });
      }
-  }, [fetchMoreUsers]);
+  }, [fetchMoreUsers, enabled]);
 
   const updateSetupData = (data: any) => setSetupData((prev: any) => ({ ...prev, ...data }));
+  const resetSetupData = () => setSetupData({});
 
   const toggleLike = (profile: any, skipApiCall?: boolean) => {
     const targetId = Number(profile?.id);
@@ -737,7 +742,7 @@ export function GlobalAppStateProvider({ children, onNavigate }: { children: Rea
   };
 
   return (
-    <AppContext.Provider value={{ serverUsers, exploreUsers, likedProfiles, savedProfiles, toggleLike, toggleSave, swipedRecords, registerSwipe, settings, updateSettings, onNavigate, activeChatUser, setActiveChatUser, isTestFemaleView, toggleTestFemaleView: () => setIsTestFemaleView(v => !v), myProfile, updateMyProfile, setupData, updateSetupData, globalMatchModal, setGlobalMatchModal, fetchMoreUsers, replayProfiles, saveSettings, isSavingPref, logout }}>
+    <AppContext.Provider value={{ serverUsers, exploreUsers, likedProfiles, savedProfiles, toggleLike, toggleSave, swipedRecords, registerSwipe, settings, updateSettings, onNavigate, activeChatUser, setActiveChatUser, isTestFemaleView, toggleTestFemaleView: () => setIsTestFemaleView(v => !v), myProfile, updateMyProfile, setupData, updateSetupData, resetSetupData, globalMatchModal, setGlobalMatchModal, fetchMoreUsers, replayProfiles, saveSettings, isSavingPref, logout }}>
       {children}
     </AppContext.Provider>
   );
